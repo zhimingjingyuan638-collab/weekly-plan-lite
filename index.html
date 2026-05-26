@@ -1,0 +1,2010 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>週案アプリ Lite</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: 'Hiragino Sans', 'Yu Gothic UI', sans-serif; }
+    .cell-hover:hover { filter: brightness(0.97); }
+    /* モバイル：スクロールバー非表示 */
+    .overflow-x-auto { -webkit-overflow-scrolling: touch; }
+    .overflow-x-auto::-webkit-scrollbar { display: none; }
+    @media print {
+      .no-print { display: none !important; }
+      body { background: white; }
+      .print-card { box-shadow: none; border: 1px solid #e5e7eb; }
+    }
+  </style>
+</head>
+<body class="bg-slate-100 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useRef } = React;
+
+    // ── マスターデータ ─────────────────────────────────────────
+    const ALL_CLASSES = [
+      '1-1','1-2','1-3','1-4',
+      '2-1','2-2','2-3','2-4',
+      '3-1','3-2','3-3','3-4',
+      'さぽ','全体',
+    ];
+    const ALL_SUBJECTS = [
+      '国語','数学','英語','理科','社会',
+      '音楽','美術','体育','技術','家庭',
+      '道徳','総合','特活','LHR','自習','その他',
+    ];
+    // v2：土曜日を追加して週6日対応
+    const DAYS     = ['月','火','水','木','金','土'];
+    const DAY_KEYS = ['mon','tue','wed','thu','fri','sat'];
+    // v2：時限の構造を「種別付き」に変更（通常授業＝class／特殊枠＝special）
+    // 並び：1限・2限・3限・4限・昼食・5限・6限・放課後・メモ
+    // v2.2：メモ・連絡事項を colSpan=7 行から「日ごと7セル」化し、昼食・放課後と同じ special スロットに統合。
+    //       旧 data.memos / data.memo は起動時に periods.memo[dayKey].unit へマイグレーションする（後述）。
+    const SLOTS = [
+      { id:'1',     label:'1限',   type:'class'   },
+      { id:'2',     label:'2限',   type:'class'   },
+      { id:'3',     label:'3限',   type:'class'   },
+      { id:'4',     label:'4限',   type:'class'   },
+      { id:'lunch', label:'昼食',  type:'special', icon:'🍱' },
+      { id:'5',     label:'5限',   type:'class'   },
+      { id:'6',     label:'6限',   type:'class'   },
+      { id:'after', label:'放課後',type:'special', icon:'🌙' },
+      // shortLabel：左の時限ヘッダ（幅52px）に表示する短縮形。モーダルヘッダなどは label を使う。
+      { id:'memo',  label:'メモ・連絡事項', shortLabel:'メモ', type:'special', icon:'📝' },
+    ];
+    const CLASS_SLOTS = SLOTS.filter(s => s.type === 'class');     // 集計用
+    const SLOT_IDS = SLOTS.map(s => s.id);                         // 全枠の id 一覧
+    const DOW_JP   = ['日','月','火','水','木','金','土'];
+
+    const SUB_STYLE = {
+      '国語': { cell:'bg-red-50',    badge:'bg-red-100 text-red-700'         },
+      '数学': { cell:'bg-blue-50',   badge:'bg-blue-100 text-blue-700'       },
+      '英語': { cell:'bg-green-50',  badge:'bg-green-100 text-green-700'     },
+      '理科': { cell:'bg-emerald-50',badge:'bg-emerald-100 text-emerald-700' },
+      '社会': { cell:'bg-yellow-50', badge:'bg-yellow-100 text-yellow-700'   },
+      '音楽': { cell:'bg-purple-50', badge:'bg-purple-100 text-purple-700'   },
+      '美術': { cell:'bg-pink-50',   badge:'bg-pink-100 text-pink-700'       },
+      '体育': { cell:'bg-orange-50', badge:'bg-orange-100 text-orange-700'   },
+      '技術': { cell:'bg-slate-50',  badge:'bg-slate-100 text-slate-600'     },
+      '家庭': { cell:'bg-rose-50',   badge:'bg-rose-100 text-rose-700'       },
+      '道徳': { cell:'bg-indigo-50', badge:'bg-indigo-100 text-indigo-700'   },
+      '総合': { cell:'bg-teal-50',   badge:'bg-teal-100 text-teal-700'       },
+      '特活': { cell:'bg-cyan-50',   badge:'bg-cyan-100 text-cyan-700'       },
+      'LHR':  { cell:'bg-violet-50', badge:'bg-violet-100 text-violet-700'   },
+      '自習': { cell:'bg-gray-50',   badge:'bg-gray-100 text-gray-500'       },
+      'その他':{ cell:'bg-gray-50',  badge:'bg-gray-200 text-gray-600'       },
+    };
+
+    // 学期ごとのカラー設定
+    const TERM_STYLE = [
+      { name:'1学期', active:'text-blue-600   border-blue-500',   btn:'bg-blue-600   hover:bg-blue-700',   icon:'bg-blue-500'   },
+      { name:'2学期', active:'text-violet-600 border-violet-500', btn:'bg-violet-600 hover:bg-violet-700', icon:'bg-violet-500' },
+      { name:'3学期', active:'text-teal-600   border-teal-500',   btn:'bg-teal-600   hover:bg-teal-700',   icon:'bg-teal-500'   },
+    ];
+
+    const DEFAULT_SETTINGS = {
+      myClasses:  [],
+      mySubjects: [],
+      customClasses:  [],
+      customSubjects: [],
+      terms: [
+        { name:'1学期', start:'', end:'' },
+        { name:'2学期', start:'', end:'' },
+        { name:'3学期', start:'', end:'' },
+      ],
+    };
+
+    const DEFAULT_ANNUAL = { dayRecords: [] };
+
+    const DEFAULT_TIMETABLE = {
+      term1: { periods: {} },
+      term2: { periods: {} },
+      term3: { periods: {} },
+    };
+
+    const DEFAULT_MASTER = {};
+
+    // ── ユーティリティ ─────────────────────────────────────────
+    function getMonday(d) {
+      const date = new Date(d);
+      const day  = date.getDay();
+      date.setDate(date.getDate() - (day === 0 ? 6 : day - 1));
+      date.setHours(0, 0, 0, 0);
+      return date;
+    }
+    function addDays(d, n) { const r = new Date(d); r.setDate(r.getDate() + n); return r; }
+    function wkey(monday) {
+      return `${monday.getFullYear()}-${String(monday.getMonth()+1).padStart(2,'0')}-${String(monday.getDate()).padStart(2,'0')}`;
+    }
+    function toDateStr(date) {
+      return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+    }
+    function fmd(d) { return `${d.getMonth()+1}/${d.getDate()}`; }
+    function isToday(d) {
+      const t = new Date();
+      return d.getFullYear()===t.getFullYear() && d.getMonth()===t.getMonth() && d.getDate()===t.getDate();
+    }
+    function getCurrentTerm(monday, terms) {
+      const key = wkey(monday);
+      return terms.find(t => t.start && t.end && key >= t.start && key <= t.end) || null;
+    }
+    function isSettingsReady(s) { return s.myClasses.length > 0 && s.mySubjects.length > 0; }
+    function genId() { return Math.random().toString(36).slice(2,10); }
+    function getLessonTitle(master, subject, lessonNo) {
+      const list = master?.[subject];
+      const n = Number(lessonNo);
+      if (!list || !n || n < 1 || n > list.length) return '';
+      return list[n-1] || '';
+    }
+    function getDayRecord(dateStr, dayRecords) {
+      return dayRecords.find(r => r.date === dateStr) || null;
+    }
+    function fmtDateLabel(dateStr) {
+      const [y,m,d] = dateStr.split('-').map(Number);
+      const dow = new Date(y, m-1, d).getDay();
+      return `${m}/${d}（${DOW_JP[dow]}）`;
+    }
+    function fmtMonthLabel(monthStr) {
+      const [y,m] = monthStr.split('-').map(Number);
+      return `${y}年 ${m}月`;
+    }
+    function getWeeksInTerm(term) {
+      if (!term?.start || !term?.end) return [];
+      const end = new Date(term.end + 'T00:00:00');
+      const weeks = [];
+      let cur = getMonday(new Date(term.start + 'T00:00:00'));
+      while (cur <= end) { weeks.push(wkey(cur)); cur = addDays(cur, 7); }
+      return weeks;
+    }
+
+    // ── CSV パーサー ───────────────────────────────────────────
+    function parseCSVLine(line) {
+      const cols = []; let cur = ''; let inQ = false;
+      for (const ch of line) {
+        if (ch === '"') { inQ = !inQ; }
+        else if (ch === ',' && !inQ) { cols.push(cur); cur = ''; }
+        else { cur += ch; }
+      }
+      cols.push(cur);
+      return cols.map(c => c.trim());
+    }
+    function parseDateStr(raw) {
+      const s = raw.trim().replace(/\//g,'-').replace(/年|月/g,'-').replace(/日/g,'');
+      const full  = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+      if (full)  return `${full[1]}-${full[2].padStart(2,'0')}-${full[3].padStart(2,'0')}`;
+      const short = s.match(/^(\d{1,2})-(\d{1,2})$/);
+      if (short) return `${new Date().getFullYear()}-${short[1].padStart(2,'0')}-${short[2].padStart(2,'0')}`;
+      return null;
+    }
+    function parseCSV(text) {
+      const lines = text.replace(/^﻿/,'').split(/\r?\n/);
+      const records = [];
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const cols = parseCSVLine(line);
+        const date = parseDateStr(cols[0] || '');
+        if (!date) continue;
+        records.push({ id:genId(), date, dailySchedule:(cols[1]||'').trim(), events:(cols[2]||'').trim() });
+      }
+      return records.sort((a,b) => a.date.localeCompare(b.date));
+    }
+    function downloadTemplateCsv() {
+      const bom  = '﻿';
+      const rows = [
+        '日付,日課,行事',
+        '2026/4/13,A5掃学,登校指導①（教員）/避難訓練/部活動見学②',
+        '2026/4/14,A6×学,仮入部①/時間割試行/初任研１（集合）/共同実施',
+        '2026/4/15,B5掃×,全体研修会/郡教振理事/郡研究所運委会',
+        '2026/4/16,B5××,耳鼻科健診/中体連専門部会/町総合教育会議',
+        '2026/4/17,B6掃学,認証式/専門委員会/町国際化対応担当者会',
+        '2026/4/18,土4,土曜授業/部活動',
+      ].join('\n');
+      const blob = new Blob([bom+rows], {type:'text/csv;charset=utf-8;'});
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url; a.download = '週案Lite_年間行事日課_テンプレート.csv'; a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    // ── Flash helper（共通） ───────────────────────────────────
+    function Flash({ msg }) {
+      if (!msg) return null;
+      return (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 bg-green-600 text-white px-6 py-3 rounded-2xl shadow-lg font-semibold text-sm no-print pointer-events-none">
+          ✓ {msg}
+        </div>
+      );
+    }
+    function useFlash() {
+      const [msg, setMsg] = useState('');
+      const show = (m) => { setMsg(m); setTimeout(() => setMsg(''), 2800); };
+      return [msg, show];
+    }
+
+    // ── InlineEditor ───────────────────────────────────────────
+    function InlineEditor({ value, onChange, autoValue='', placeholder, multiline, className }) {
+      const [editing, setEditing] = useState(false);
+      const [draft,   setDraft  ] = useState('');
+      const isAuto    = !value && !!autoValue;
+      const displayed = value || autoValue;
+      const startEditing = () => { setDraft(displayed); setEditing(true); };
+      const commit = () => { onChange(draft); setEditing(false); };
+      const cancel = () => { setEditing(false); };
+      if (!editing) {
+        return (
+          <div onClick={startEditing}
+            title={isAuto ? '年間データから自動反映（クリックで変更）' : undefined}
+            className={`cursor-text p-2 min-h-[40px] text-xs whitespace-pre-wrap
+              ${className} ${!displayed?'text-gray-300 italic':''} ${isAuto?'opacity-55':''}`}>
+            {displayed || placeholder}
+          </div>
+        );
+      }
+      const shared = {
+        value:draft, onChange:e=>setDraft(e.target.value), onBlur:commit,
+        onKeyDown:e=>{ if(e.key==='Escape') cancel(); if(!multiline&&e.key==='Enter'&&!e.nativeEvent.isComposing&&e.keyCode!==229) commit(); },
+        autoFocus:true, className:`w-full p-2 text-xs focus:outline-none bg-white/90 ${className}`,
+      };
+      return multiline
+        ? <textarea rows={3} style={{resize:'none'}} {...shared}/>
+        : <input type="text" {...shared}/>;
+    }
+
+    // ── PeriodCell ─────────────────────────────────────────────
+    // v2：通常授業／特殊枠（昼食・放課後）の両方を担当。
+    // 特殊枠は教科欄や授業回数を持たず、メモ（unit）だけが表示対象。
+    function PeriodCell({ cell, today, onClick, master, slot }) {
+      const isSpecial = slot?.type === 'special';
+      const isMemo    = slot?.id === 'memo';
+      // v2.2：memo は給食・放課後（amber系）とは別色に。グレー系の落ち着いた見た目で連絡事項らしさを出す。
+      const st    = isSpecial
+        ? { cell: isMemo ? 'bg-gray-50' : 'bg-amber-50/60' }
+        : (SUB_STYLE[cell?.subject] || {});
+      const empty = isSpecial
+        ? !cell?.unit
+        : (!cell?.className && !cell?.subject && !cell?.unit && !cell?.lessonNo);
+      const autoTitle = (!isSpecial && master) ? getLessonTitle(master, cell?.subject, cell?.lessonNo) : '';
+      const specialTextColor = isMemo ? 'text-gray-700' : 'text-amber-900';
+      return (
+        <div onClick={onClick}
+          className={`min-h-[76px] p-2 cursor-pointer cell-hover transition-all
+            ${st.cell||'bg-white'} ${today?'ring-2 ring-inset ring-blue-300':''}`}>
+          {empty
+            ? <div className="h-full min-h-[60px] flex items-center justify-center text-gray-200 text-lg select-none">＋</div>
+            : isSpecial
+              ? <div className={`text-xs ${specialTextColor} leading-tight whitespace-pre-wrap`} style={{display:'-webkit-box',WebkitLineClamp:isMemo?4:3,WebkitBoxOrient:'vertical',overflow:'hidden'}}>{cell.unit}</div>
+              : <div className="space-y-1">
+                  {cell.className && <div className="font-bold text-gray-800 text-sm leading-none">{cell.className}</div>}
+                  {cell.subject && <span className={`inline-block text-xs px-1.5 py-0.5 rounded font-semibold ${st.badge||'bg-gray-100 text-gray-600'}`}>{cell.subject}</span>}
+                  {cell.lessonNo && (
+                    <div className="text-[11px] font-semibold text-gray-700 leading-tight">
+                      第{cell.lessonNo}時{autoTitle ? `：${autoTitle}` : ''}
+                    </div>
+                  )}
+                  {cell.unit && <div className="text-xs text-gray-600 leading-tight" style={{display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical',overflow:'hidden'}}>{cell.unit}</div>}
+                </div>
+          }
+        </div>
+      );
+    }
+
+    // ── PeriodModal ────────────────────────────────────────────
+    // v2：slot を受け取り、特殊枠（type==='special'）のときは教科・クラス・授業回数を非表示にして
+    // メモ（unit）だけを編集できるシンプルなUIにする。データ形は { className, subject, lessonNo, unit } で
+    // 統一（特殊枠は className/subject/lessonNo が常に空）。
+    function PeriodModal({ slot, dayIdx, cell, classes, subjects, master, onSave, onClear, onClose, hideLessonNo }) {
+      const isSpecial = slot?.type === 'special';
+      const [form, setForm] = useState({
+        className:cell?.className||'', subject:cell?.subject||'',
+        lessonNo:cell?.lessonNo||'', unit:cell?.unit||'',
+      });
+      const previewTitle = getLessonTitle(master||{}, form.subject, form.lessonNo);
+      useEffect(() => {
+        const h = e => { if (e.key==='Escape') onClose(); };
+        window.addEventListener('keydown', h);
+        return () => window.removeEventListener('keydown', h);
+      }, [onClose]);
+      const tog = (field, val) => setForm(f => ({...f, [field]:f[field]===val?'':val}));
+
+      const headerLabel = isSpecial
+        ? `${DAYS[dayIdx]}曜日　${slot.icon||''}${slot.label}`
+        : `${DAYS[dayIdx]}曜日　${slot.label}`;
+      const headerClass = isSpecial
+        ? 'bg-gradient-to-r from-amber-600 to-amber-500'
+        : 'bg-gradient-to-r from-blue-600 to-blue-500';
+      const saveBtnClass = isSpecial
+        ? 'bg-amber-600 hover:bg-amber-700'
+        : 'bg-blue-600 hover:bg-blue-700';
+
+      return (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+          onClick={e=>{ if(e.target===e.currentTarget) onClose(); }}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
+            <div className={`${headerClass} px-6 py-4 flex items-center justify-between text-white`}>
+              <h2 className="font-bold text-lg">{headerLabel}</h2>
+              <button onClick={onClose} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-white/20 text-xl">✕</button>
+            </div>
+            <div className="p-6 space-y-5">
+              {!isSpecial && (
+                <>
+                  <div>
+                    <p className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-2">クラス</p>
+                    <div className="flex flex-wrap gap-2">
+                      {classes.map(c => (
+                        <button key={c} onClick={() => tog('className',c)}
+                          className={`px-3 py-1.5 rounded-lg text-sm font-semibold border-2 transition-all
+                            ${form.className===c?'bg-blue-600 text-white border-blue-600':'bg-gray-50 text-gray-600 border-gray-100 hover:border-blue-300'}`}>
+                          {c}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-2">教科</p>
+                    <div className="flex flex-wrap gap-2">
+                      {subjects.map(s => {
+                        const st=SUB_STYLE[s]||{}; const sel=form.subject===s;
+                        return (
+                          <button key={s} onClick={() => tog('subject',s)}
+                            className={`px-3 py-1.5 rounded-lg text-sm font-semibold border-2 transition-all
+                              ${sel?`${st.badge} border-current`:'bg-gray-50 text-gray-600 border-gray-100 hover:border-gray-300'}`}>
+                            {s}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  {!hideLessonNo && (
+                    <div>
+                      <p className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-2">授業回数（単元マスター連動）</p>
+                      <input type="number" min="1" inputMode="numeric"
+                        className="w-full border-2 border-gray-100 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-blue-400 transition"
+                        placeholder="例：3（単元マスタータブから単元名を自動表示）"
+                        value={form.lessonNo}
+                        onChange={e=>setForm(f=>({...f,lessonNo:e.target.value.replace(/[^0-9]/g,'')}))}
+                      />
+                      {form.lessonNo && (
+                        previewTitle
+                          ? <div className="mt-2 bg-blue-50 border border-blue-100 rounded-xl px-4 py-2.5">
+                              <p className="text-[10px] font-bold text-blue-400 mb-0.5">📚 単元マスターより自動表示</p>
+                              <p className="text-sm font-semibold text-blue-800">第{form.lessonNo}時：{previewTitle}</p>
+                            </div>
+                          : <p className="mt-2 text-xs text-gray-400">この教科・回数の単元名は未登録です（「単元マスター」タブで登録できます）</p>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+              <div>
+                <p className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-2">
+                  {isSpecial ? 'メモ・連絡事項' : '単元・内容（自由入力・省略可）'}
+                </p>
+                {isSpecial ? (
+                  <textarea rows={slot.id==='memo' ? 6 : 4}
+                    className="w-full border-2 border-gray-100 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-amber-400 transition resize-y"
+                    placeholder={
+                      slot.id==='lunch' ? '例：給食当番／配膳の指示／アレルギー対応 など' :
+                      slot.id==='after' ? '例：清掃当番／部活／生徒対応 など' :
+                      slot.id==='memo'  ? '例：欠席連絡／提出物／持ち物／保護者連絡 など'
+                                        : ''
+                    }
+                    value={form.unit} onChange={e=>setForm(f=>({...f,unit:e.target.value}))}
+                  />
+                ) : (
+                  <input type="text"
+                    className="w-full border-2 border-gray-100 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:border-blue-400 transition"
+                    placeholder="補足メモや授業内容（省略可）"
+                    value={form.unit} onChange={e=>setForm(f=>({...f,unit:e.target.value}))}
+                    onKeyDown={e=>{ if(e.key==='Enter'&&!e.nativeEvent.isComposing&&e.keyCode!==229) onSave(form); }}
+                  />
+                )}
+              </div>
+            </div>
+            <div className="px-6 pb-6 flex gap-3">
+              <button onClick={()=>onSave(form)} className={`flex-1 ${saveBtnClass} text-white py-3 rounded-xl font-bold transition`}>保存</button>
+              <button onClick={onClear} className="px-5 py-3 rounded-xl font-medium border-2 border-gray-200 text-gray-400 hover:bg-gray-50 transition">クリア</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── TopNav ─────────────────────────────────────────────────
+    function TopNav({ view, setView, ready }) {
+      const tabs = [
+        { key:'main',      label:'📅 週案',          short:'週案'    },
+        { key:'timetable', label:'🗓 時間割',         short:'時間割'  },
+        { key:'master',    label:'📖 単元マスター',    short:'単元'    },
+        { key:'annual',    label:'📋 年間行事・日課',  short:'行事'    },
+        { key:'stats',     label:'📊 集計',           short:'集計'    },
+        { key:'settings',  label:'⚙️ 設定', warn:!ready, short:'設定' },
+      ];
+      return (
+        <nav className="bg-white border-b border-gray-200 no-print sticky top-0 z-40 shadow-sm">
+          {/* ── PC: 1行レイアウト ── */}
+          <div className="px-4 py-3 flex items-center justify-between">
+            <div className="flex items-center gap-3 shrink-0">
+              <div className="w-9 h-9 bg-blue-600 rounded-xl flex items-center justify-center shadow-sm">
+                <span className="text-white font-black text-sm">週</span>
+              </div>
+              <div className="hidden sm:flex items-baseline gap-1.5">
+                <span className="font-bold text-gray-800 text-base tracking-tight">週案アプリ</span>
+                <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">Lite</span>
+              </div>
+            </div>
+            {/* デスクトップ用タブ（sm以上） */}
+            <div className="hidden sm:flex gap-1 bg-gray-100 p-1 rounded-xl">
+              {tabs.map(tab => (
+                <button key={tab.key} onClick={() => setView(tab.key)}
+                  className={`relative px-3 py-1.5 rounded-lg text-sm font-semibold transition-all whitespace-nowrap
+                    ${view===tab.key?'bg-white text-blue-600 shadow-sm':'text-gray-500 hover:text-gray-700'}`}>
+                  {tab.label}
+                  {tab.warn && <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-400 rounded-full border-2 border-white"/>}
+                </button>
+              ))}
+            </div>
+            {/* モバイル：現在のページ名 */}
+            <span className="sm:hidden text-sm font-bold text-blue-600">
+              {tabs.find(t=>t.key===view)?.label}
+            </span>
+          </div>
+          {/* ── モバイル用タブバー（sm未満） ── */}
+          <div className="sm:hidden flex border-t border-gray-100 overflow-x-auto">
+            {tabs.map(tab => (
+              <button key={tab.key} onClick={() => setView(tab.key)}
+                className={`relative flex-1 min-w-[60px] py-2.5 text-xs font-bold whitespace-nowrap border-b-2 transition-all
+                  ${view===tab.key?'text-blue-600 border-blue-500 bg-blue-50/40':'text-gray-400 border-transparent'}`}>
+                {tab.short}
+                {tab.warn && <span className="absolute top-1 right-1 w-2 h-2 bg-red-400 rounded-full border border-white"/>}
+              </button>
+            ))}
+          </div>
+        </nav>
+      );
+    }
+
+    // ── TimetableView（ベース時間割） ──────────────────────────
+    // v2：土曜列追加。特殊枠（昼食・放課後）も同じテーブル内に並べる（教科欄なしのメモ枠）。
+    function TimetableView({ timetable, setTimetable, settings, master, allData, setAllData }) {
+      const [activeTerm,  setActiveTerm ] = useState(0);
+      const [modal,       setModal      ] = useState(null);
+      const [confirmReg,  setConfirmReg ] = useState(null);
+      const [regMode,     setRegMode    ] = useState('empty');
+      const [showClear,   setShowClear  ] = useState(false);
+      const [flashMsg,    showFlash     ] = useFlash();
+
+      const termKey  = `term${activeTerm+1}`;
+      const termData = timetable[termKey] || { periods:{} };
+      const termInfo = settings.terms[activeTerm];
+      const hasDate  = !!(termInfo?.start && termInfo?.end);
+      const classes  = settings.myClasses.length  > 0 ? settings.myClasses  : ALL_CLASSES;
+      const subjects = settings.mySubjects.length > 0 ? settings.mySubjects : ALL_SUBJECTS;
+
+      const weekCount = hasDate ? getWeeksInTerm(termInfo).length : 0;
+
+      const getCell = (slotId, dayKey) => termData.periods?.[slotId]?.[dayKey] || null;
+
+      const setCell = (slotId, dayKey, cell) =>
+        setTimetable(t => ({
+          ...t,
+          [termKey]: {
+            ...(t[termKey]||{}),
+            periods: {
+              ...(t[termKey]?.periods||{}),
+              [slotId]: { ...(t[termKey]?.periods?.[slotId]||{}), [dayKey]: cell },
+            },
+          },
+        }));
+
+      const copyFromTerm = (fromIdx) => {
+        const fromKey  = `term${fromIdx+1}`;
+        const fromData = timetable[fromKey]?.periods || {};
+        setTimetable(t => ({
+          ...t,
+          [termKey]: { periods: JSON.parse(JSON.stringify(fromData)) },
+        }));
+        showFlash(`${settings.terms[fromIdx].name}の時間割をコピーしました`);
+      };
+
+      const clearTerm = () => {
+        setTimetable(t => ({ ...t, [termKey]: { periods:{} } }));
+        setShowClear(false);
+        showFlash('この学期の時間割をクリアしました');
+      };
+
+      // 週案への一括登録（v2：6日×全SLOTS）
+      const registerToWeeks = () => {
+        const termIdx = confirmReg;
+        const term    = settings.terms[termIdx];
+        const ttKey   = `term${termIdx+1}`;
+        const ttPeriods = timetable[ttKey]?.periods || {};
+        const weeks   = getWeeksInTerm(term);
+
+        setAllData(prev => {
+          const updated = { ...prev };
+          for (const wk of weeks) {
+            const existing      = updated[wk] || {};
+            const existPeriods  = existing.periods || {};
+            const newPeriods    = {};
+
+            for (const slot of SLOTS) {
+              newPeriods[slot.id] = { ...(existPeriods[slot.id]||{}) };
+              for (const dayKey of DAY_KEYS) {
+                const baseCell = ttPeriods[slot.id]?.[dayKey];
+                if (regMode === 'empty' && newPeriods[slot.id][dayKey]) continue;
+                newPeriods[slot.id][dayKey] = baseCell ? { ...baseCell } : null;
+              }
+            }
+            updated[wk] = { ...existing, periods: newPeriods };
+          }
+          return updated;
+        });
+
+        setConfirmReg(null);
+        showFlash(`${term.name}（${weeks.length}週分）を週案に一括登録しました`);
+      };
+
+      return (
+        <div className="max-w-5xl mx-auto py-6 px-4 space-y-4">
+          <Flash msg={flashMsg} />
+
+          <div className="bg-white rounded-2xl shadow-lg overflow-hidden">
+
+            {/* ── ヘッダー ── */}
+            <div className="bg-gradient-to-r from-gray-700 to-gray-600 px-6 py-4 text-white flex items-center justify-between">
+              <div>
+                <p className="text-gray-300 text-xs font-semibold tracking-widest uppercase mb-0.5">Base Timetable</p>
+                <h1 className="text-xl font-bold">ベース時間割</h1>
+              </div>
+              <p className="text-gray-400 text-xs text-right">学期ごとの基本時間割を入力し<br/>週案へ一括登録できます（週6日／昼食・放課後対応）</p>
+            </div>
+
+            {/* ── 学期タブ ── */}
+            <div className="flex border-b border-gray-100">
+              {settings.terms.map((term, idx) => {
+                const active = activeTerm === idx;
+                const ts     = TERM_STYLE[idx];
+                const hasD   = !!(term.start && term.end);
+                return (
+                  <button key={idx} onClick={() => setActiveTerm(idx)}
+                    className={`flex-1 py-3 px-4 text-sm font-bold transition-all border-b-2 flex flex-col items-center gap-0.5
+                      ${active ? `${ts.active}` : 'border-transparent text-gray-400 hover:text-gray-600'}`}>
+                    <span>{term.name}</span>
+                    <span className={`text-xs font-normal ${hasD ? 'text-gray-400' : 'text-red-300'}`}>
+                      {hasD
+                        ? `${fmd(new Date(term.start+'T00:00:00'))}〜${fmd(new Date(term.end+'T00:00:00'))} (${getWeeksInTerm(term).length}週)`
+                        : '日程未設定'}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* ── 操作バー（コピー・クリア） ── */}
+            <div className="px-5 py-2.5 bg-gray-50 border-b border-gray-100 flex items-center gap-2 flex-wrap">
+              <span className="text-xs text-gray-400 font-medium shrink-0">他の学期からコピー：</span>
+              {settings.terms.map((term, idx) => {
+                if (idx === activeTerm) return null;
+                return (
+                  <button key={idx}
+                    onClick={() => {
+                      if (window.confirm(`「${term.name}」の時間割を「${settings.terms[activeTerm].name}」にコピーしますか？\n現在の内容は上書きされます。`))
+                        copyFromTerm(idx);
+                    }}
+                    className="text-xs px-3 py-1.5 rounded-lg font-semibold border-2 border-gray-200 text-gray-600 hover:border-blue-300 hover:text-blue-600 transition bg-white">
+                    {term.name}をコピー
+                  </button>
+                );
+              })}
+              <button onClick={() => setShowClear(true)}
+                className="ml-auto text-xs px-3 py-1.5 rounded-lg font-semibold border-2 border-red-100 text-red-400 hover:bg-red-50 transition">
+                この学期をクリア
+              </button>
+            </div>
+
+            {/* ── グリッド ── */}
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse table-fixed" style={{minWidth:'640px'}}>
+                <colgroup>
+                  <col style={{width:'52px'}}/>
+                  {DAY_KEYS.map(k => <col key={k}/>)}
+                </colgroup>
+                <thead>
+                  <tr className="border-b-2 border-gray-100">
+                    <th className="p-2 text-xs text-gray-400 font-medium bg-gray-50">時限</th>
+                    {DAYS.map((day,i) => (
+                      <th key={i} className="p-3 text-center border-l border-gray-100 bg-gray-50">
+                        <div className="text-lg font-bold text-gray-700">{day}</div>
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {SLOTS.map(slot => {
+                    const isSpecial = slot.type === 'special';
+                    return (
+                      <tr key={slot.id} className={`border-b border-gray-100 ${isSpecial?'bg-amber-50/40':''}`}>
+                        <td className={`p-1 text-center border-r border-gray-100 select-none ${isSpecial?'bg-amber-100/60':'bg-gray-50'}`}>
+                          {isSpecial
+                            ? <div className="text-amber-700 font-bold text-[11px] leading-tight">{slot.icon}<br/>{slot.shortLabel||slot.label}</div>
+                            : <>
+                                <div className="font-bold text-gray-600 text-sm leading-none">{slot.id}</div>
+                                <div className="text-gray-400 text-xs leading-none mt-0.5">限</div>
+                              </>}
+                        </td>
+                        {DAY_KEYS.map((dayKey, i) => (
+                          <td key={dayKey} className="border-l border-gray-100 p-0">
+                            <PeriodCell slot={slot} cell={getCell(slot.id, dayKey)} today={false} master={master}
+                              onClick={() => setModal({ slot, dayIdx:i, dayKey })}/>
+                          </td>
+                        ))}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {/* ── 一括登録フッター ── */}
+            <div className="px-6 py-5 bg-gray-50 border-t-2 border-gray-100">
+              <div className="flex items-center gap-4 flex-wrap">
+                <div className="flex-1 min-w-0">
+                  <p className="font-bold text-gray-800">週案へ一括登録</p>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    {hasDate
+                      ? `${termInfo.name}（${termInfo.start} 〜 ${termInfo.end}）の全${weekCount}週に一括反映します`
+                      : '⚠ 先に「設定」タブで学期の日程を入力してください'}
+                  </p>
+                </div>
+                <button disabled={!hasDate} onClick={() => setConfirmReg(activeTerm)}
+                  className={`shrink-0 px-7 py-3 rounded-xl font-bold text-white text-sm transition-all shadow-sm
+                    ${hasDate ? `${TERM_STYLE[activeTerm].btn} hover:shadow-md` : 'bg-gray-300 cursor-not-allowed'}`}>
+                  📅 {termInfo.name}に一括登録
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* ── 一括登録確認モーダル ── */}
+          {confirmReg !== null && (() => {
+            const term = settings.terms[confirmReg];
+            const wks  = getWeeksInTerm(term);
+            return (
+              <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+                onClick={e=>{ if(e.target===e.currentTarget) setConfirmReg(null); }}>
+                <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+                  <div className="bg-gradient-to-r from-gray-700 to-gray-600 px-6 py-4 text-white flex items-center justify-between">
+                    <h2 className="font-bold text-lg">📅 一括登録の確認</h2>
+                    <button onClick={() => setConfirmReg(null)} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-white/20">✕</button>
+                  </div>
+                  <div className="p-6 space-y-5">
+                    <div className={`rounded-xl p-4 ${TERM_STYLE[confirmReg].icon} bg-opacity-10`}
+                      style={{backgroundColor: confirmReg===0?'#eff6ff': confirmReg===1?'#f5f3ff':'#f0fdfa'}}>
+                      <p className="font-bold text-gray-800 text-base">{term.name}</p>
+                      <p className="text-sm text-gray-500 mt-0.5">{term.start} 〜 {term.end}</p>
+                      <p className="text-sm font-bold mt-2" style={{color: confirmReg===0?'#2563eb': confirmReg===1?'#7c3aed':'#0d9488'}}>
+                        対象：{wks.length}週分（昼食・放課後・メモ・土曜含む全枠）
+                      </p>
+                    </div>
+
+                    <div>
+                      <p className="text-sm font-bold text-gray-700 mb-3">既存コマの扱い</p>
+                      {[
+                        { key:'empty',     label:'空欄のみ埋める',   desc:'手動で入力済みのコマはそのまま残す（安全）' },
+                        { key:'overwrite', label:'全て上書き',       desc:'手動入力済みも含めて全て上書きする' },
+                      ].map(opt => (
+                        <label key={opt.key} className="flex items-start gap-3 mb-3 cursor-pointer group">
+                          <input type="radio" name="regMode" value={opt.key} checked={regMode===opt.key}
+                            onChange={() => setRegMode(opt.key)} className="accent-blue-600 mt-0.5 shrink-0"/>
+                          <div>
+                            <p className="text-sm font-semibold text-gray-700">{opt.label}</p>
+                            <p className="text-xs text-gray-400">{opt.desc}</p>
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="px-6 pb-6 flex gap-3">
+                    <button onClick={registerToWeeks}
+                      className={`flex-1 text-white py-3 rounded-xl font-bold transition ${TERM_STYLE[confirmReg].btn}`}>
+                      {wks.length}週分を登録する
+                    </button>
+                    <button onClick={() => setConfirmReg(null)}
+                      className="px-5 py-3 rounded-xl font-medium border-2 border-gray-200 text-gray-400 hover:bg-gray-50 transition">
+                      キャンセル
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ── クリア確認 ── */}
+          {showClear && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+              <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-sm w-full text-center">
+                <div className="text-5xl mb-3">🗑️</div>
+                <h3 className="font-bold text-gray-800 text-lg mb-2">{termInfo.name}の時間割をクリアしますか？</h3>
+                <p className="text-sm text-gray-400 mb-6">入力済みの全コマが削除されます。週案への登録済みデータは影響を受けません。</p>
+                <div className="flex gap-3">
+                  <button onClick={clearTerm} className="flex-1 bg-red-500 hover:bg-red-600 text-white py-3 rounded-xl font-bold transition">クリア</button>
+                  <button onClick={() => setShowClear(false)} className="flex-1 border-2 border-gray-200 text-gray-500 py-3 rounded-xl font-semibold hover:bg-gray-50 transition">キャンセル</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── セル編集モーダル ── */}
+          {modal && (
+            <PeriodModal slot={modal.slot} dayIdx={modal.dayIdx} hideLessonNo
+              cell={getCell(modal.slot.id, modal.dayKey)} classes={classes} subjects={subjects} master={master}
+              onSave={form => { setCell(modal.slot.id, modal.dayKey, form); setModal(null); }}
+              onClear={()  => { setCell(modal.slot.id, modal.dayKey, null); setModal(null); }}
+              onClose={()  => setModal(null)}
+            />
+          )}
+        </div>
+      );
+    }
+
+    // ── CsvImportModal ─────────────────────────────────────────
+    function CsvImportModal({ onImport, onClose }) {
+      const [parsed,   setParsed  ] = useState([]);
+      const [error,    setError   ] = useState('');
+      const [mode,     setMode    ] = useState('merge');
+      const [encoding, setEncoding] = useState('UTF-8');
+      const [dragging, setDragging] = useState(false);
+      const fileRef = useRef();
+
+      useEffect(() => {
+        const h = e => { if(e.key==='Escape') onClose(); };
+        window.addEventListener('keydown',h);
+        return () => window.removeEventListener('keydown',h);
+      },[]);
+
+      const processFile = (file) => {
+        if (!file) return;
+        setParsed([]); setError('');
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          try {
+            const records = parseCSV(e.target.result);
+            if (!records.length) { setError('有効なデータが見つかりませんでした。フォーマット・文字コードを確認してください。'); }
+            else setParsed(records);
+          } catch { setError('ファイルの読み込みに失敗しました。'); }
+        };
+        reader.readAsText(file, encoding);
+      };
+
+      return (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
+          onClick={e=>{ if(e.target===e.currentTarget) onClose(); }}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="bg-gradient-to-r from-blue-600 to-blue-500 px-6 py-4 flex items-center justify-between text-white shrink-0">
+              <h2 className="font-bold text-lg">📂 CSVインポート</h2>
+              <button onClick={onClose} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-white/20 text-xl">✕</button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-6 space-y-5">
+              <div className="bg-blue-50 rounded-xl p-4 text-xs text-blue-800 space-y-1">
+                <p className="font-bold text-sm mb-1">📄 CSVフォーマット（3列）</p>
+                <div className="font-mono bg-white/70 rounded-lg p-3 leading-relaxed">
+                  <span className="text-gray-400">日付,日課,行事</span><br/>
+                  2026/4/13,A5掃学,登校指導①/避難訓練<br/>
+                  2026/4/14,A6×学,仮入部①/時間割試行<br/>
+                  2026/4/18,土4,土曜授業/部活動
+                </div>
+                <button onClick={downloadTemplateCsv}
+                  className="mt-1 text-blue-600 hover:text-blue-800 font-semibold underline">
+                  ⬇ テンプレートをダウンロード
+                </button>
+              </div>
+              <div className="flex items-center gap-4">
+                <span className="text-sm font-semibold text-gray-600 shrink-0">文字コード：</span>
+                {['UTF-8','Shift_JIS'].map(enc => (
+                  <label key={enc} className="flex items-center gap-1.5 cursor-pointer">
+                    <input type="radio" name="enc" value={enc} checked={encoding===enc}
+                      onChange={() => { setEncoding(enc); setParsed([]); setError(''); }} className="accent-blue-600"/>
+                    <span className="text-sm text-gray-700">{enc==='UTF-8'?'UTF-8（Mac / Google スプレッドシート）':'Shift-JIS（Windows Excel）'}</span>
+                  </label>
+                ))}
+              </div>
+              <div onClick={() => fileRef.current?.click()}
+                onDrop={e=>{ e.preventDefault(); setDragging(false); processFile(e.dataTransfer.files[0]); }}
+                onDragOver={e=>{ e.preventDefault(); setDragging(true); }}
+                onDragLeave={() => setDragging(false)}
+                className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all
+                  ${dragging?'border-blue-400 bg-blue-50':'border-gray-200 hover:border-blue-300 hover:bg-gray-50'}`}>
+                <div className="text-4xl mb-2">{dragging?'📥':'📂'}</div>
+                <p className="font-semibold text-gray-600 text-sm">クリックまたはドラッグ＆ドロップ</p>
+                <p className="text-xs text-gray-400 mt-1">CSVファイル (.csv)</p>
+                <input ref={fileRef} type="file" accept=".csv,text/csv" hidden
+                  onChange={e=>processFile(e.target.files[0])}/>
+              </div>
+              {error && <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-700">⚠ {error}</div>}
+              {parsed.length > 0 && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-gray-700">{parsed.length}件 読み込み完了</span>
+                    {parsed.length>8 && <span className="text-xs text-gray-400">（先頭8件を表示）</span>}
+                  </div>
+                  <div className="border border-gray-100 rounded-xl overflow-hidden text-sm">
+                    <div className="grid grid-cols-[120px_100px_1fr] bg-gray-50 text-xs font-semibold text-gray-500 px-3 py-2 border-b border-gray-100">
+                      <span>日付</span><span>日課</span><span>行事</span>
+                    </div>
+                    {parsed.slice(0,8).map((r,i) => (
+                      <div key={i} className={`grid grid-cols-[120px_100px_1fr] px-3 py-2 text-xs gap-2 ${i%2===0?'bg-white':'bg-gray-50/50'}`}>
+                        <span className="font-semibold text-amber-700">{fmtDateLabel(r.date)}</span>
+                        <span className="font-semibold text-blue-700">{r.dailySchedule||'—'}</span>
+                        <span className="text-gray-700 truncate">{r.events||'—'}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex gap-4 p-4 bg-gray-50 rounded-xl">
+                    {[
+                      { key:'merge',   label:'既存に追加・同日は上書き', desc:'同じ日付は新しいデータで上書き' },
+                      { key:'replace', label:'全て置き換え',             desc:'既存データを全削除してから取り込む' },
+                    ].map(opt => (
+                      <label key={opt.key} className="flex items-start gap-2 cursor-pointer flex-1">
+                        <input type="radio" name="mode" value={opt.key} checked={mode===opt.key}
+                          onChange={() => setMode(opt.key)} className="accent-blue-600 mt-0.5 shrink-0"/>
+                        <div>
+                          <p className="text-sm font-semibold text-gray-700">{opt.label}</p>
+                          <p className="text-xs text-gray-400 mt-0.5">{opt.desc}</p>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="px-6 py-4 border-t border-gray-100 flex gap-3 shrink-0">
+              {parsed.length>0 && (
+                <button onClick={() => onImport(parsed, mode)}
+                  className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl font-bold transition">
+                  {parsed.length}件をインポート
+                </button>
+              )}
+              <button onClick={onClose}
+                className="px-6 py-3 rounded-xl font-medium border-2 border-gray-200 text-gray-500 hover:bg-gray-50 transition">
+                キャンセル
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── AnnualView ─────────────────────────────────────────────
+    function AnnualView({ annualData, setAnnualData }) {
+      const [newDate,     setNewDate    ] = useState('');
+      const [newSchedule, setNewSchedule] = useState('');
+      const [newEvents,   setNewEvents  ] = useState('');
+      const [showImport,  setShowImport ] = useState(false);
+      const [showClear,   setShowClear  ] = useState(false);
+      const [flashMsg,    showFlash     ] = useFlash();
+
+      const addRecord = () => {
+        if (!newDate) return;
+        const record = { id:genId(), date:newDate, dailySchedule:newSchedule.trim(), events:newEvents.trim() };
+        setAnnualData(d => {
+          const rest = d.dayRecords.filter(r => r.date!==newDate);
+          return { ...d, dayRecords:[...rest,record].sort((a,b)=>a.date.localeCompare(b.date)) };
+        });
+        setNewSchedule(''); setNewEvents('');
+        showFlash('追加しました');
+      };
+
+      const removeRecord = id =>
+        setAnnualData(d => ({ ...d, dayRecords:d.dayRecords.filter(r=>r.id!==id) }));
+
+      const importRecords = (records, mode) => {
+        setAnnualData(d => {
+          if (mode==='replace') return { ...d, dayRecords:records };
+          const filtered = d.dayRecords.filter(r => !records.some(nr=>nr.date===r.date));
+          return { ...d, dayRecords:[...filtered,...records].sort((a,b)=>a.date.localeCompare(b.date)) };
+        });
+        setShowImport(false);
+        showFlash(`${records.length}件をインポートしました`);
+      };
+
+      const clearAll = () => {
+        setAnnualData(d => ({ ...d, dayRecords:[] }));
+        setShowClear(false);
+        showFlash('全件削除しました');
+      };
+
+      const byMonth = {};
+      annualData.dayRecords.forEach(r => {
+        const m = r.date.slice(0,7);
+        if (!byMonth[m]) byMonth[m]=[];
+        byMonth[m].push(r);
+      });
+      const total = annualData.dayRecords.length;
+
+      return (
+        <div className="max-w-4xl mx-auto py-8 px-4 space-y-6">
+          <Flash msg={flashMsg}/>
+          <div className="flex flex-wrap gap-2 items-center">
+            <button onClick={() => setShowImport(true)}
+              className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold transition shadow-sm">
+              📂 CSVインポート
+            </button>
+            <button onClick={downloadTemplateCsv}
+              className="flex items-center gap-2 px-5 py-2.5 bg-white hover:bg-gray-50 text-gray-700 rounded-xl text-sm font-semibold border-2 border-gray-200 transition">
+              ⬇ テンプレートDL
+            </button>
+            {total > 0 && <>
+              <button onClick={() => setShowClear(true)}
+                className="px-4 py-2.5 text-red-500 hover:bg-red-50 rounded-xl text-sm font-semibold border-2 border-red-100 transition ml-auto">
+                🗑 全件削除
+              </button>
+              <span className="text-sm text-gray-400 font-medium">{total}件登録済み</span>
+            </>}
+          </div>
+
+          <section className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+            <div className="px-6 py-4 bg-gradient-to-r from-amber-50 to-white border-b border-gray-100 flex items-center gap-3">
+              <div className="w-9 h-9 bg-amber-100 rounded-xl flex items-center justify-center text-lg">✏️</div>
+              <div>
+                <h2 className="font-bold text-gray-800">1件追加・上書き</h2>
+                <p className="text-xs text-gray-400 mt-0.5">日付・日課・行事をセットで登録。同じ日付を追加すると上書きされます</p>
+              </div>
+            </div>
+            <div className="p-4 sm:p-6">
+              <div className="grid grid-cols-1 sm:grid-cols-[160px_130px_1fr_auto] gap-3 items-end">
+                <div>
+                  <label className="block text-xs font-semibold text-gray-500 mb-1">日付 <span className="text-red-400">*</span></label>
+                  <input type="date" value={newDate} onChange={e=>setNewDate(e.target.value)}
+                    className="w-full border-2 border-gray-100 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-amber-400 transition"/>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-gray-500 mb-1">日課</label>
+                  <input type="text" value={newSchedule} onChange={e=>setNewSchedule(e.target.value)}
+                    placeholder="例: A5掃学"
+                    className="w-full border-2 border-gray-100 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-amber-400 transition font-semibold text-blue-700"/>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-gray-500 mb-1">行事</label>
+                  <input type="text" value={newEvents} onChange={e=>setNewEvents(e.target.value)}
+                    placeholder="行事名（なければ空欄可）"
+                    onKeyDown={e=>{ if(e.key==='Enter'&&!e.nativeEvent.isComposing&&e.keyCode!==229) addRecord(); }}
+                    className="w-full border-2 border-gray-100 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-amber-400 transition"/>
+                </div>
+                <button onClick={addRecord} disabled={!newDate}
+                  className="w-full sm:w-auto px-5 py-2.5 bg-amber-500 hover:bg-amber-600 disabled:opacity-40 text-white rounded-xl text-sm font-bold transition">
+                  ＋ 追加
+                </button>
+              </div>
+            </div>
+          </section>
+
+          <section className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+            <div className="px-6 py-4 bg-gradient-to-r from-blue-50 to-white border-b border-gray-100 flex items-center gap-3">
+              <div className="w-9 h-9 bg-blue-100 rounded-xl flex items-center justify-center text-lg">📋</div>
+              <div>
+                <h2 className="font-bold text-gray-800">登録済みデータ</h2>
+                <p className="text-xs text-gray-400 mt-0.5">週案の「行事」「日課」欄に自動反映（薄い表示＝自動反映中）</p>
+              </div>
+            </div>
+            {total === 0
+              ? <div className="py-16 text-center text-gray-300">
+                  <div className="text-5xl mb-3">📭</div>
+                  <p className="font-semibold">データがまだ登録されていません</p>
+                  <p className="text-xs mt-1">CSVインポートまたは1件追加から登録してください</p>
+                </div>
+              : <div className="divide-y divide-gray-50">
+                  <div className="hidden sm:grid grid-cols-[140px_110px_1fr_44px] px-6 py-2 bg-gray-50 text-xs font-semibold text-gray-400 uppercase tracking-wide">
+                    <span>日付</span><span>日課</span><span>行事</span><span/>
+                  </div>
+                  {Object.entries(byMonth).map(([month, records]) => (
+                    <div key={month}>
+                      <div className="px-6 py-2 bg-gradient-to-r from-gray-50 to-white border-b border-gray-100">
+                        <span className="text-xs font-bold text-gray-400 tracking-widest">{fmtMonthLabel(month)}</span>
+                        <span className="text-xs text-gray-300 ml-2">{records.length}件</span>
+                      </div>
+                      {records.map(r => (
+                        <div key={r.id} className="group transition-colors hover:bg-amber-50/30">
+                          <div className="hidden sm:grid grid-cols-[140px_110px_1fr_44px] px-6 py-2.5 items-center">
+                            <span className="font-semibold text-amber-700 text-xs">{fmtDateLabel(r.date)}</span>
+                            <span className="font-semibold text-blue-700 text-xs">{r.dailySchedule||<span className="text-gray-300">—</span>}</span>
+                            <span className="text-gray-700 text-xs truncate pr-2">{r.events||<span className="text-gray-300">—</span>}</span>
+                            <button onClick={() => removeRecord(r.id)}
+                              className="opacity-0 group-hover:opacity-100 w-8 h-8 flex items-center justify-center text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all">
+                              ✕
+                            </button>
+                          </div>
+                          <div className="sm:hidden px-4 py-3 flex items-start gap-3">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 mb-0.5">
+                                <span className="font-bold text-amber-700 text-xs">{fmtDateLabel(r.date)}</span>
+                                {r.dailySchedule && <span className="font-semibold text-blue-700 text-xs bg-blue-50 px-1.5 py-0.5 rounded">{r.dailySchedule}</span>}
+                              </div>
+                              <span className="text-gray-600 text-xs leading-relaxed">{r.events||<span className="text-gray-300">—</span>}</span>
+                            </div>
+                            <button onClick={() => removeRecord(r.id)}
+                              className="shrink-0 w-8 h-8 flex items-center justify-center text-red-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all">
+                              ✕
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+            }
+          </section>
+
+          {showClear && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+              <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-sm w-full text-center">
+                <div className="text-5xl mb-4">🗑️</div>
+                <h3 className="font-bold text-gray-800 text-lg mb-2">全件削除しますか？</h3>
+                <p className="text-sm text-gray-500 mb-6">{total}件のデータが全て削除されます。この操作は取り消せません。</p>
+                <div className="flex gap-3">
+                  <button onClick={clearAll} className="flex-1 bg-red-500 hover:bg-red-600 text-white py-3 rounded-xl font-bold transition">削除する</button>
+                  <button onClick={() => setShowClear(false)} className="flex-1 border-2 border-gray-200 text-gray-500 py-3 rounded-xl font-semibold hover:bg-gray-50 transition">キャンセル</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {showImport && <CsvImportModal onImport={importRecords} onClose={() => setShowImport(false)}/>}
+        </div>
+      );
+    }
+
+    // ── MasterView（単元マスター・独立タブ）────────────────────
+    function MasterView({ master, setMaster }) {
+      const masterSubjects = Object.keys(master);
+      const [curSubj,  setCurSubj ] = useState(masterSubjects[0] || '');
+      const [newLesson,setNewLesson] = useState('');
+      const [newSubj,  setNewSubj  ] = useState('');
+      const lessons = master[curSubj] || [];
+      const addSubject = () => {
+        const n = newSubj.trim();
+        if (!n) return;
+        if (master[n]) { window.alert('その教科は登録済みです'); return; }
+        setMaster(m => ({ ...m, [n]:[] })); setCurSubj(n); setNewSubj('');
+      };
+      const deleteSubject = (s) => {
+        if (!window.confirm(`「${s}」の単元マスターを丸ごと削除しますか？`)) return;
+        setMaster(m => { const c={...m}; delete c[s]; return c; });
+        setCurSubj(prev => prev===s ? (Object.keys(master).filter(k=>k!==s)[0]||'') : prev);
+      };
+      const addLesson = () => {
+        const t = newLesson.trim();
+        if (!t || !curSubj) return;
+        setMaster(m => ({ ...m, [curSubj]:[...(m[curSubj]||[]), t] }));
+        setNewLesson('');
+      };
+      const removeLesson = (idx) =>
+        setMaster(m => ({ ...m, [curSubj]:(m[curSubj]||[]).filter((_,i)=>i!==idx) }));
+      const moveLesson = (idx, dir) => setMaster(m => {
+        const arr = [...(m[curSubj]||[])]; const ni = idx+dir;
+        if (ni<0 || ni>=arr.length) return m;
+        [arr[idx],arr[ni]] = [arr[ni],arr[idx]];
+        return { ...m, [curSubj]:arr };
+      });
+      return (
+        <div className="max-w-3xl mx-auto py-8 px-4 space-y-6">
+          <section className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+            <div className="px-6 py-4 bg-gradient-to-r from-indigo-50 to-white border-b border-gray-100 flex items-center gap-3">
+              <div className="w-9 h-9 bg-indigo-100 rounded-xl flex items-center justify-center text-lg">📖</div>
+              <div>
+                <h2 className="font-bold text-gray-800">単元マスター</h2>
+                <p className="text-xs text-gray-400 mt-0.5">教科ごとに単元を順番に登録。週案で「授業回数」を入れると単元名が自動表示されます（自動保存）</p>
+              </div>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="flex flex-wrap gap-2 items-center">
+                {masterSubjects.map(s => (
+                  <button key={s} onClick={() => setCurSubj(s)}
+                    className={`px-4 py-2 rounded-xl text-sm font-bold border-2 transition-all
+                      ${s===curSubj?'bg-indigo-600 text-white border-indigo-600 shadow-sm':'bg-gray-50 text-gray-600 border-gray-100 hover:border-indigo-300'}`}>
+                    {s}<span className="ml-1.5 text-xs opacity-70">{(master[s]||[]).length}</span>
+                  </button>
+                ))}
+                {masterSubjects.length === 0 && (
+                  <p className="text-xs text-gray-400">まだ教科が登録されていません。下の欄から教科を追加してください。</p>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <input type="text" value={newSubj} onChange={e=>setNewSubj(e.target.value)}
+                  placeholder="教科を追加（例：数学）"
+                  onKeyDown={e=>{ if(e.key==='Enter'&&!e.nativeEvent.isComposing&&e.keyCode!==229) addSubject(); }}
+                  className="flex-1 border-2 border-gray-100 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-indigo-400 transition"/>
+                <button onClick={addSubject}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-bold transition shrink-0">＋ 教科</button>
+              </div>
+
+              {curSubj && (
+                <div className="border border-gray-100 rounded-2xl p-4 bg-gray-50/50">
+                  <div className="flex items-center justify-between mb-3">
+                    <span className="font-bold text-gray-700">📖 {curSubj} の単元一覧</span>
+                    <button onClick={() => deleteSubject(curSubj)}
+                      className="text-xs px-3 py-1 rounded-lg font-semibold border border-red-100 text-red-400 hover:bg-red-50 transition">教科を削除</button>
+                  </div>
+                  {lessons.length === 0
+                    ? <p className="text-xs text-gray-400 py-3 text-center">単元がまだありません。下の入力欄から追加してください。</p>
+                    : (() => {
+                        const groups = [];
+                        for (let s = 0; s < lessons.length; s += 10) {
+                          groups.push({ start: s, end: Math.min(s+10, lessons.length), items: lessons.slice(s, s+10) });
+                        }
+                        return (
+                          <div className="space-y-2">
+                            {groups.map((g, gi) => (
+                              <details key={gi} className="bg-white rounded-xl border border-gray-100 overflow-hidden">
+                                <summary className="cursor-pointer px-3 py-2 text-sm font-bold text-gray-700 bg-gray-50 hover:bg-gray-100 transition flex justify-between items-center">
+                                  <span>第{g.start+1}〜{g.end}時</span>
+                                  <span className="text-xs font-normal text-gray-400">{g.items.length}件</span>
+                                </summary>
+                                <div className="space-y-1.5 p-3">
+                                  {g.items.map((title, k) => {
+                                    const i = g.start + k;
+                                    return (
+                                      <div key={i} className="flex items-center gap-2 bg-white rounded-xl border border-gray-100 px-3 py-2">
+                                        <span className="w-7 h-7 shrink-0 bg-indigo-100 text-indigo-700 rounded-lg flex items-center justify-center text-xs font-black">{i+1}</span>
+                                        <span className="flex-1 text-sm text-gray-700 truncate">{title}</span>
+                                        <button onClick={() => moveLesson(i,-1)} disabled={i===0}
+                                          className="w-7 h-7 rounded-lg text-gray-400 hover:bg-gray-100 disabled:opacity-20 transition">↑</button>
+                                        <button onClick={() => moveLesson(i,1)} disabled={i===lessons.length-1}
+                                          className="w-7 h-7 rounded-lg text-gray-400 hover:bg-gray-100 disabled:opacity-20 transition">↓</button>
+                                        <button onClick={() => removeLesson(i)}
+                                          className="w-7 h-7 rounded-lg text-red-300 hover:text-red-500 hover:bg-red-50 transition">✕</button>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </details>
+                            ))}
+                          </div>
+                        );
+                      })()
+                  }
+                  <div className="flex gap-2 mt-3">
+                    <input type="text" value={newLesson} onChange={e=>setNewLesson(e.target.value)}
+                      placeholder="単元名を入力（例：一次方程式の利用）"
+                      onKeyDown={e=>{ if(e.key==='Enter'&&!e.nativeEvent.isComposing&&e.keyCode!==229) addLesson(); }}
+                      className="flex-1 border-2 border-gray-100 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-indigo-400 transition"/>
+                    <button onClick={addLesson}
+                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-bold transition shrink-0">追加</button>
+                  </div>
+                  <p className="text-xs text-gray-400 mt-2">追加した順に番号（＝授業回数）が自動で付きます</p>
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      );
+    }
+
+    // ── SettingsView ───────────────────────────────────────────
+    function SettingsView({ settings, onSave, onExport, onImport }) {
+      const [draft, setDraft] = useState(() => ({
+        ...DEFAULT_SETTINGS, ...settings, terms:settings.terms.map(t=>({...t})),
+      }));
+      const [saved, setSaved] = useState(false);
+      const backupRef = useRef();
+      const toggleClass   = cls => setDraft(d => ({
+        ...d, myClasses: d.myClasses.includes(cls)?d.myClasses.filter(c=>c!==cls):[...d.myClasses,cls],
+      }));
+      const toggleSubject = sub => setDraft(d => ({
+        ...d, mySubjects: d.mySubjects.includes(sub)?d.mySubjects.filter(s=>s!==sub):[...d.mySubjects,sub],
+      }));
+      const [newClassInput, setNewClassInput] = useState('');
+      const [newSubjectInput, setNewSubjectInput] = useState('');
+      const addCustomClass = () => {
+        const v = newClassInput.trim();
+        if (!v) return;
+        setDraft(d => {
+          const existing = [...ALL_CLASSES, ...(d.customClasses||[])];
+          if (existing.includes(v)) return d;
+          return { ...d, customClasses: [...(d.customClasses||[]), v], myClasses: [...d.myClasses, v] };
+        });
+        setNewClassInput('');
+      };
+      const removeCustomClass = (cls) => {
+        setDraft(d => ({
+          ...d,
+          customClasses: (d.customClasses||[]).filter(c => c !== cls),
+          myClasses: d.myClasses.filter(c => c !== cls),
+        }));
+      };
+      const addCustomSubject = () => {
+        const v = newSubjectInput.trim();
+        if (!v) return;
+        setDraft(d => {
+          const existing = [...ALL_SUBJECTS, ...(d.customSubjects||[])];
+          if (existing.includes(v)) return d;
+          return { ...d, customSubjects: [...(d.customSubjects||[]), v], mySubjects: [...d.mySubjects, v] };
+        });
+        setNewSubjectInput('');
+      };
+      const removeCustomSubject = (sub) => {
+        setDraft(d => ({
+          ...d,
+          customSubjects: (d.customSubjects||[]).filter(s => s !== sub),
+          mySubjects: d.mySubjects.filter(s => s !== sub),
+        }));
+      };
+      const updateTerm = (idx,field,val) =>
+        setDraft(d => ({ ...d, terms:d.terms.map((t,i)=>i===idx?{...t,[field]:val}:t) }));
+      const handleSave = () => { onSave(draft); setSaved(true); setTimeout(()=>setSaved(false),2000); };
+      const TERM_COLORS = ['bg-blue-500','bg-violet-500','bg-teal-500'];
+      return (
+        <div className="max-w-3xl mx-auto py-8 px-4 space-y-6">
+          {/* 担当クラス */}
+          <section className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+            <div className="px-6 py-4 bg-gradient-to-r from-blue-50 to-white border-b border-gray-100 flex items-center gap-3">
+              <div className="w-9 h-9 bg-blue-100 rounded-xl flex items-center justify-center text-lg">🏫</div>
+              <div><h2 className="font-bold text-gray-800">担当クラス</h2><p className="text-xs text-gray-400 mt-0.5">担当するクラスを選択（複数可）</p></div>
+            </div>
+            <div className="p-6">
+              <div className="flex flex-wrap gap-2 mb-4">
+                {[...ALL_CLASSES, ...(draft.customClasses||[])].map(cls => {
+                  const isCustom = (draft.customClasses||[]).includes(cls);
+                  return (
+                    <div key={cls} className="relative inline-flex items-center">
+                      <button onClick={() => toggleClass(cls)}
+                        className={`px-4 py-2 rounded-xl text-sm font-bold border-2 transition-all
+                          ${draft.myClasses.includes(cls)?'bg-blue-600 text-white border-blue-600 shadow-sm':'bg-gray-50 text-gray-600 border-gray-100 hover:border-blue-300 hover:text-blue-600'}
+                          ${isCustom?'pr-7':''}`}>
+                        {cls}
+                      </button>
+                      {isCustom && (
+                        <button onClick={() => removeCustomClass(cls)}
+                          title="このカスタムクラスを削除"
+                          className="absolute right-1 top-1/2 -translate-y-1/2 w-5 h-5 text-xs rounded-full hover:bg-red-100 text-red-400 hover:text-red-600 transition">✕</button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex gap-2 mb-3">
+                <input type="text" value={newClassInput} onChange={e=>setNewClassInput(e.target.value)}
+                  placeholder="クラスを追加（例：個別指導）"
+                  onKeyDown={e=>{ if(e.key==='Enter' && !e.nativeEvent.isComposing && e.keyCode!==229) addCustomClass(); }}
+                  className="flex-1 border-2 border-gray-100 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-blue-400 transition"/>
+                <button onClick={addCustomClass}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold transition shrink-0">＋ 追加</button>
+              </div>
+              {draft.myClasses.length>0 && (
+                <div className="flex items-center gap-2 flex-wrap pt-3 border-t border-gray-100">
+                  <span className="text-xs text-gray-400 shrink-0">選択中：</span>
+                  {draft.myClasses.map(c=><span key={c} className="text-xs bg-blue-100 text-blue-700 px-2.5 py-1 rounded-lg font-semibold">{c}</span>)}
+                </div>
+              )}
+            </div>
+          </section>
+          {/* 担当教科 */}
+          <section className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+            <div className="px-6 py-4 bg-gradient-to-r from-blue-50 to-white border-b border-gray-100 flex items-center gap-3">
+              <div className="w-9 h-9 bg-blue-100 rounded-xl flex items-center justify-center text-lg">📚</div>
+              <div><h2 className="font-bold text-gray-800">担当教科</h2><p className="text-xs text-gray-400 mt-0.5">担当する教科を選択（複数可）</p></div>
+            </div>
+            <div className="p-6">
+              <div className="flex flex-wrap gap-2 mb-4">
+                {[...ALL_SUBJECTS, ...(draft.customSubjects||[])].map(sub => {
+                  const st=SUB_STYLE[sub]||{}; const sel=draft.mySubjects.includes(sub);
+                  const isCustom = (draft.customSubjects||[]).includes(sub);
+                  return (
+                    <div key={sub} className="relative inline-flex items-center">
+                      <button onClick={() => toggleSubject(sub)}
+                        className={`px-4 py-2 rounded-xl text-sm font-bold border-2 transition-all
+                          ${sel?`${st.badge||'bg-blue-600 text-white'} border-current shadow-sm`:'bg-gray-50 text-gray-600 border-gray-100 hover:border-gray-300'}
+                          ${isCustom?'pr-7':''}`}>
+                        {sub}
+                      </button>
+                      {isCustom && (
+                        <button onClick={() => removeCustomSubject(sub)}
+                          title="このカスタム教科を削除"
+                          className="absolute right-1 top-1/2 -translate-y-1/2 w-5 h-5 text-xs rounded-full hover:bg-red-100 text-red-400 hover:text-red-600 transition">✕</button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="flex gap-2 mb-3">
+                <input type="text" value={newSubjectInput} onChange={e=>setNewSubjectInput(e.target.value)}
+                  placeholder="教科を追加（例：探究／選択授業 など）"
+                  onKeyDown={e=>{ if(e.key==='Enter' && !e.nativeEvent.isComposing && e.keyCode!==229) addCustomSubject(); }}
+                  className="flex-1 border-2 border-gray-100 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-blue-400 transition"/>
+                <button onClick={addCustomSubject}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold transition shrink-0">＋ 追加</button>
+              </div>
+              {draft.mySubjects.length>0 && (
+                <div className="flex items-center gap-2 flex-wrap pt-3 border-t border-gray-100">
+                  <span className="text-xs text-gray-400 shrink-0">選択中：</span>
+                  {draft.mySubjects.map(s => {
+                    const st=SUB_STYLE[s]||{};
+                    return <span key={s} className={`text-xs px-2.5 py-1 rounded-lg font-semibold ${st.badge||'bg-gray-100 text-gray-600'}`}>{s}</span>;
+                  })}
+                </div>
+              )}
+            </div>
+          </section>
+          {/* 学期設定 */}
+          <section className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+            <div className="px-6 py-4 bg-gradient-to-r from-blue-50 to-white border-b border-gray-100 flex items-center gap-3">
+              <div className="w-9 h-9 bg-blue-100 rounded-xl flex items-center justify-center text-lg">📆</div>
+              <div><h2 className="font-bold text-gray-800">学期設定</h2><p className="text-xs text-gray-400 mt-0.5">各学期の開始日・終了日を入力</p></div>
+            </div>
+            <div className="p-6 space-y-5">
+              {draft.terms.map((term,idx) => (
+                <div key={idx} className="flex items-center gap-4">
+                  <div className={`w-12 h-12 rounded-2xl flex items-center justify-center text-white font-black text-xl shrink-0 ${TERM_COLORS[idx]}`}>{idx+1}</div>
+                  <div className="flex-1">
+                    <p className="text-sm font-bold text-gray-700 mb-2">{term.name}</p>
+                    <div className="flex items-center gap-2">
+                      <input type="date" value={term.start} onChange={e=>updateTerm(idx,'start',e.target.value)}
+                        className="flex-1 border-2 border-gray-100 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-blue-400 transition text-gray-700"/>
+                      <span className="text-gray-400 shrink-0 font-medium">〜</span>
+                      <input type="date" value={term.end} onChange={e=>updateTerm(idx,'end',e.target.value)}
+                        className="flex-1 border-2 border-gray-100 rounded-xl px-3 py-2 text-sm focus:outline-none focus:border-blue-400 transition text-gray-700"/>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+          <button onClick={handleSave}
+            className={`w-full py-4 rounded-2xl font-bold text-lg transition-all shadow-md
+              ${saved?'bg-green-500 text-white':'bg-blue-600 hover:bg-blue-700 text-white hover:shadow-lg'}`}>
+            {saved?'✓ 保存しました！':'保存する'}
+          </button>
+
+          {/* ── バックアップ ── */}
+          <section className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+            <div className="px-6 py-4 bg-gradient-to-r from-emerald-50 to-white border-b border-gray-100 flex items-center gap-3">
+              <div className="w-9 h-9 bg-emerald-100 rounded-xl flex items-center justify-center text-lg">💾</div>
+              <div>
+                <h2 className="font-bold text-gray-800">バックアップ</h2>
+                <p className="text-xs text-gray-400 mt-0.5">データはこの端末・このブラウザに保存されます。機種変更や万一の消失に備え、定期的に書き出してください</p>
+              </div>
+            </div>
+            <div className="p-6 flex flex-wrap gap-3">
+              <button onClick={onExport}
+                className="px-5 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold transition shadow-sm">
+                ⬇ 全データを書き出す
+              </button>
+              <button onClick={() => backupRef.current?.click()}
+                className="px-5 py-3 bg-white hover:bg-gray-50 text-gray-700 rounded-xl text-sm font-semibold border-2 border-gray-200 transition">
+                ⬆ バックアップを読み込む
+              </button>
+              <input ref={backupRef} type="file" accept="application/json,.json" hidden
+                onChange={e=>{ if(e.target.files[0]){ onImport(e.target.files[0]); e.target.value=''; } }}/>
+            </div>
+            <div className="px-6 pb-6 text-xs text-gray-400 leading-relaxed">
+              Lite版のバックアップファイルは <code className="bg-gray-100 px-1 rounded">jukan-integrated-lite</code> 形式で書き出されます。
+              旧バージョン（jukan-integrated / jukan-integrated-v2 / jukan-integrated-byoc）のバックアップもこの画面から読み込み可能です（自動でLite形式に変換して取り込みます）。
+            </div>
+          </section>
+        </div>
+      );
+    }
+
+    // ── WeeklyPlanView ─────────────────────────────────────────
+    // Lite：6日表示／特殊枠2つを含むテーブル。カレンダー同期・週単位の時間割反映は削除。
+    function WeeklyPlanView({ settings, annualData, master, timetable, setView, allData, setAllData }) {
+      const [monday, setMonday] = useState(() => getMonday(new Date()));
+      const [modal,  setModal ] = useState(null);
+      const [flashMsg, showFlash] = useFlash();
+
+      const wk       = wkey(monday);
+      const dates    = DAY_KEYS.map((_,i) => addDays(monday,i));  // 月〜土
+      const data     = allData[wk] || {};
+      const classes  = settings.myClasses.length  > 0 ? settings.myClasses  : ALL_CLASSES;
+      const subjects = settings.mySubjects.length > 0 ? settings.mySubjects : ALL_SUBJECTS;
+      const term     = getCurrentTerm(monday, settings.terms);
+      const ready    = isSettingsReady(settings);
+
+      const patch = useCallback(updates => {
+        setAllData(p => ({ ...p, [wk]:{ ...(p[wk]||{}), ...updates } }));
+      }, [wk]);
+      const getCell = (slotId, dayKey) => data.periods?.[slotId]?.[dayKey] || null;
+      const setCell = useCallback((slotId, dayKey, cell) => {
+        setAllData(p => {
+          const wd = p[wk]||{};
+          return { ...p, [wk]:{ ...wd, periods:{ ...(wd.periods||{}),
+            [slotId]:{ ...(wd.periods?.[slotId]||{}), [dayKey]:cell } } } };
+        });
+      }, [wk]);
+
+      const prevWk  = () => setMonday(m => addDays(m,-7));
+      const nextWk  = () => setMonday(m => addDays(m,+7));
+      const todayWk = () => setMonday(getMonday(new Date()));
+
+      const patchEvent = (dayKey, v) => {
+        const ev = { ...(data.events||{}) };
+        if (!v) delete ev[dayKey]; else ev[dayKey]=v;
+        patch({ events:ev });
+      };
+      const patchSchedule = (dayKey, v) => {
+        const ds = { ...(data.dailySchedule||{}) };
+        if (!v) delete ds[dayKey]; else ds[dayKey]=v;
+        patch({ dailySchedule:ds });
+      };
+
+      return (
+        <div className="min-h-screen bg-slate-100 py-6 px-2 sm:px-4">
+          <Flash msg={flashMsg}/>
+          <div className="max-w-6xl mx-auto">
+            {!ready && (
+              <div className="mb-4 bg-amber-50 border border-amber-200 rounded-2xl px-5 py-3 flex items-center justify-between no-print">
+                <span className="text-amber-700 text-sm font-medium">⚠️ 初期設定が未完了です。担当クラス・教科を設定するとより使いやすくなります。</span>
+                <button onClick={() => setView('settings')}
+                  className="ml-4 shrink-0 px-4 py-1.5 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-sm font-bold transition">設定する →</button>
+              </div>
+            )}
+            {/* Lite：1テーブル構成（日程→行事→日課→1〜4限→昼食→5・6限→放課後→メモ）。
+                放課後とメモ・連絡事項の間に太線（border-b-2）を維持する。 */}
+            <div className="bg-white rounded-2xl shadow-lg overflow-hidden print-card">
+              <div className="bg-gradient-to-r from-blue-700 to-blue-500 px-6 py-5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 no-print">
+                <div>
+                  {term && <span className="inline-block text-xs bg-white/20 text-blue-100 px-2.5 py-0.5 rounded-lg font-semibold mb-1">{term.name}</span>}
+                  <h1 className="text-white text-xl font-bold">{fmd(dates[0])}（月）〜 {fmd(dates[5])}（土）</h1>
+                </div>
+                <div className="flex gap-2 items-center flex-wrap">
+                  <button onClick={prevWk}  className="flex-1 sm:flex-none px-3 sm:px-4 py-2 bg-white/20 hover:bg-white/30 text-white rounded-xl text-sm font-semibold transition">← 前週</button>
+                  <button onClick={todayWk} className="flex-1 sm:flex-none px-3 sm:px-4 py-2 bg-white/20 hover:bg-white/30 text-white rounded-xl text-sm font-semibold transition">今週</button>
+                  <button onClick={nextWk}  className="flex-1 sm:flex-none px-3 sm:px-4 py-2 bg-white/20 hover:bg-white/30 text-white rounded-xl text-sm font-semibold transition">次週 →</button>
+                  <button onClick={() => window.print()} className="hidden sm:block px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-xl text-sm font-semibold border border-white/30 transition">🖨 印刷</button>
+                </div>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse table-fixed" style={{minWidth:'720px'}}>
+                  <colgroup>
+                    <col style={{width:'56px'}}/>
+                    {DAY_KEYS.map(k=><col key={k}/>)}
+                  </colgroup>
+                  <thead>
+                    <tr className="border-b-2 border-gray-100">
+                      <th className="p-2 text-xs text-gray-400 font-medium bg-gray-50">時限</th>
+                      {dates.map((date,i) => (
+                        <th key={i} className={`p-3 text-center border-l border-gray-100 ${isToday(date)?'bg-blue-50':(i===5?'bg-gray-100/70':'bg-gray-50')}`}>
+                          <div className={`text-lg font-bold ${isToday(date)?'text-blue-600':(i===5?'text-indigo-700':'text-gray-700')}`}>{DAYS[i]}</div>
+                          <div className={`text-xs mt-0.5 font-medium ${isToday(date)?'text-blue-400':'text-gray-400'}`}>{fmd(date)}</div>
+                          {isToday(date) && <div className="mt-1.5 w-1.5 h-1.5 bg-blue-500 rounded-full mx-auto"/>}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr className="border-b border-gray-100">
+                      <td className="p-1 bg-amber-50 text-center text-xs font-bold text-amber-600 border-r border-gray-100">行事</td>
+                      {DAY_KEYS.map((dayKey,i) => {
+                        const rec = getDayRecord(toDateStr(dates[i]), annualData.dayRecords);
+                        return (
+                          <td key={dayKey} className="border-l border-gray-100 bg-amber-50/50">
+                            <InlineEditor value={data.events?.[dayKey]||''} autoValue={rec?.events||''}
+                              onChange={v=>patchEvent(dayKey,v)} placeholder="行事を入力" multiline className="text-amber-900"/>
+                          </td>
+                        );
+                      })}
+                    </tr>
+                    <tr className="border-b-2 border-gray-200">
+                      <td className="p-1 bg-blue-50 text-center text-xs font-bold text-blue-600 border-r border-gray-100">日課</td>
+                      {DAY_KEYS.map((dayKey,i) => {
+                        const rec = getDayRecord(toDateStr(dates[i]), annualData.dayRecords);
+                        return (
+                          <td key={dayKey} className={`border-l border-gray-100 ${isToday(dates[i])?'bg-blue-50/60':'bg-blue-50/25'}`}>
+                            <InlineEditor value={data.dailySchedule?.[dayKey]||''} autoValue={rec?.dailySchedule||''}
+                              onChange={v=>patchSchedule(dayKey,v)} placeholder="日課" className="text-blue-700 font-semibold"/>
+                          </td>
+                        );
+                      })}
+                    </tr>
+                    {SLOTS.map((slot, idx) => {
+                      const isSpecial = slot.type === 'special';
+                      // v2.2：メモ行は授業表とは別物なので、メモの「1つ前」（=放課後）に太線を入れる。
+                      //       これで「授業＋給食＋放課後」と「メモ」の視覚的な境界が維持される。
+                      const memoIdx = SLOTS.findIndex(s => s.id === 'memo');
+                      const isDividerRow = (memoIdx > 0) && (idx === memoIdx - 1);
+                      const isMemoRow    = slot.id === 'memo';
+                      return (
+                        <tr key={slot.id} className={`${isDividerRow?'border-b-4 border-gray-500':'border-b border-gray-100'} ${isSpecial?(isMemoRow?'bg-gray-50':'bg-amber-50/30'):''}`}>
+                          <td className={`p-1 text-center border-r border-gray-100 select-none ${isSpecial?(isMemoRow?'bg-gray-700 text-white':'bg-amber-100/60'):'bg-gray-50'}`}>
+                            {isSpecial
+                              ? <div className={`font-bold text-[11px] leading-tight ${isMemoRow?'text-white':'text-amber-700'}`}>{slot.icon}<br/>{slot.shortLabel||slot.label}</div>
+                              : <>
+                                  <div className="font-bold text-gray-600 text-sm leading-none">{slot.id}</div>
+                                  <div className="text-gray-400 text-xs leading-none mt-0.5">限</div>
+                                </>}
+                          </td>
+                          {DAY_KEYS.map((dayKey,i) => (
+                            <td key={dayKey} className="border-l border-gray-100 p-0">
+                              <PeriodCell slot={slot} cell={getCell(slot.id, dayKey)} today={isToday(dates[i])} master={master}
+                                onClick={()=>setModal({slot, dayIdx:i, dayKey})}/>
+                            </td>
+                          ))}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <p className="text-center text-xs text-gray-400 mt-4 no-print">データはこのブラウザに自動保存されます（Liteキー：weekPlanLite*）</p>
+          </div>
+          {modal && (
+            <PeriodModal slot={modal.slot} dayIdx={modal.dayIdx}
+              cell={getCell(modal.slot.id, modal.dayKey)} classes={classes} subjects={subjects} master={master}
+              onSave={form=>{ setCell(modal.slot.id, modal.dayKey, form); setModal(null); }}
+              onClear={()=>{ setCell(modal.slot.id, modal.dayKey, null); setModal(null); }}
+              onClose={()=>setModal(null)}/>
+          )}
+        </div>
+      );
+    }
+
+    // ── StatsView（授業時数集計） ──────────────────────────────
+    // 集計対象：通常授業（type==='class'）のみ。特殊枠（昼食・放課後）は授業時数に含めない。
+    function StatsView({ allData, settings }) {
+      const [mode, setMode] = useState('class');
+      const [detailClass, setDetailClass] = useState(null);
+
+      const termStats = settings.terms.map((term) => {
+        const weeks = getWeeksInTerm(term);
+        const byClass = {}, bySubject = {}, byClassSubject = {};
+        for (const wk of weeks) {
+          const wd = allData[wk];
+          if (!wd?.periods) continue;
+          for (const slot of CLASS_SLOTS) {
+            for (const dayKey of DAY_KEYS) {
+              const cell = wd.periods[slot.id]?.[dayKey];
+              if (!cell?.className && !cell?.subject) continue;
+              const cls = cell.className || '';
+              const sub = cell.subject  || '';
+              if (cls) byClass[cls]   = (byClass[cls]   || 0) + 1;
+              if (sub) bySubject[sub] = (bySubject[sub] || 0) + 1;
+              if (cls && sub) {
+                if (!byClassSubject[cls]) byClassSubject[cls] = {};
+                byClassSubject[cls][sub] = (byClassSubject[cls][sub] || 0) + 1;
+              }
+            }
+          }
+        }
+        return { byClass, bySubject, byClassSubject };
+      });
+
+      const foundClasses = [...new Set(termStats.flatMap(ts => Object.keys(ts.byClass)))];
+      const displayClasses = settings.myClasses.length > 0
+        ? settings.myClasses.filter(c => foundClasses.includes(c)).concat(foundClasses.filter(c => !settings.myClasses.includes(c)))
+        : foundClasses;
+
+      const foundSubjects = [...new Set(termStats.flatMap(ts => Object.keys(ts.bySubject)))];
+      const displaySubjects = settings.mySubjects.length > 0
+        ? settings.mySubjects.filter(s => foundSubjects.includes(s)).concat(foundSubjects.filter(s => !settings.mySubjects.includes(s)))
+        : foundSubjects;
+
+      const totalByClass   = {};
+      const totalBySubject = {};
+      termStats.forEach(ts => {
+        Object.entries(ts.byClass).forEach(([k,v])   => { totalByClass[k]   = (totalByClass[k]   || 0) + v; });
+        Object.entries(ts.bySubject).forEach(([k,v]) => { totalBySubject[k] = (totalBySubject[k] || 0) + v; });
+      });
+
+      const grandTotal = Object.values(totalByClass).reduce((s,v) => s+v, 0);
+
+      const maxClass   = Math.max(1, ...Object.values(totalByClass));
+      const maxSubject = Math.max(1, ...Object.values(totalBySubject));
+      function cellBg(val, max) {
+        if (!val) return '';
+        const ratio = val / max;
+        if (ratio >= 0.75) return 'bg-indigo-100 text-indigo-800 font-bold';
+        if (ratio >= 0.40) return 'bg-indigo-50  text-indigo-700 font-semibold';
+        return 'text-gray-700';
+      }
+
+      const hasData = displayClasses.length > 0 || displaySubjects.length > 0;
+      const termTermStyle = ['text-blue-600','text-violet-600','text-teal-600'];
+      const termBgStyle   = ['bg-blue-50',   'bg-violet-50',   'bg-teal-50'  ];
+
+      const DetailModal = ({ cls }) => {
+        const subs = settings.mySubjects.length > 0 ? settings.mySubjects : displaySubjects;
+        return (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+            onClick={e => { if (e.target===e.currentTarget) setDetailClass(null); }}>
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden">
+              <div className="bg-gradient-to-r from-indigo-700 to-indigo-500 px-6 py-4 flex items-center justify-between text-white">
+                <div>
+                  <p className="text-indigo-200 text-xs font-semibold">クラス詳細</p>
+                  <h2 className="font-bold text-lg">{cls} の教科別授業時数</h2>
+                </div>
+                <button onClick={() => setDetailClass(null)} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-white/20 text-xl">✕</button>
+              </div>
+              <div className="overflow-x-auto p-4">
+                <table className="w-full text-sm border-collapse">
+                  <thead>
+                    <tr className="border-b-2 border-gray-100">
+                      <th className="text-left px-4 py-2 text-xs text-gray-400 font-semibold">教科</th>
+                      {settings.terms.map((term,i) => (
+                        <th key={i} className={`px-4 py-2 text-center text-xs font-bold ${termTermStyle[i]}`}>{term.name}</th>
+                      ))}
+                      <th className="px-4 py-2 text-center text-xs font-bold text-gray-700">合計</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {subs.map((sub, si) => {
+                      const termVals = termStats.map(ts => ts.byClassSubject?.[cls]?.[sub] || 0);
+                      const total = termVals.reduce((s,v) => s+v, 0);
+                      if (!total) return null;
+                      const st = SUB_STYLE[sub] || {};
+                      return (
+                        <tr key={sub} className={si%2===0?'bg-white':'bg-gray-50/50'}>
+                          <td className="px-4 py-2.5">
+                            <span className={`inline-block text-xs px-2 py-0.5 rounded font-semibold ${st.badge||'bg-gray-100 text-gray-600'}`}>{sub}</span>
+                          </td>
+                          {termVals.map((v, ti) => (
+                            <td key={ti} className={`px-4 py-2.5 text-center tabular-nums ${v ? termTermStyle[ti] : 'text-gray-200'}`}>
+                              {v || '—'}
+                            </td>
+                          ))}
+                          <td className="px-4 py-2.5 text-center font-bold text-gray-800 tabular-nums">{total}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr className="border-t-2 border-gray-200">
+                      <td className="px-4 py-2.5 font-bold text-gray-700 text-xs">合計</td>
+                      {termStats.map((ts, ti) => (
+                        <td key={ti} className={`px-4 py-2.5 text-center font-bold tabular-nums ${termTermStyle[ti]}`}>
+                          {ts.byClass[cls] || '—'}
+                        </td>
+                      ))}
+                      <td className="px-4 py-2.5 text-center font-black text-indigo-700 tabular-nums">
+                        {totalByClass[cls] || '—'}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      return (
+        <div className="max-w-5xl mx-auto py-6 px-4 space-y-5">
+          <div className="bg-white rounded-2xl shadow-lg overflow-hidden">
+            <div className="bg-gradient-to-r from-indigo-700 to-indigo-500 px-6 py-4 text-white flex items-center justify-between">
+              <div>
+                <p className="text-indigo-200 text-xs font-semibold tracking-widest uppercase mb-0.5">Statistics</p>
+                <h1 className="text-xl font-bold">授業時数集計</h1>
+                <p className="text-indigo-200 text-[10px] mt-0.5">※ 昼食・放課後は集計対象外</p>
+              </div>
+              {hasData && (
+                <div className="text-right">
+                  <p className="text-indigo-200 text-xs">全学期 合計</p>
+                  <p className="text-3xl font-black">{grandTotal}<span className="text-base font-normal ml-1 text-indigo-200">コマ</span></p>
+                </div>
+              )}
+            </div>
+
+            <div className="flex border-b border-gray-100">
+              {[{key:'class',label:'クラス別',icon:'🏫'},{key:'subject',label:'教科別',icon:'📚'}].map(m => (
+                <button key={m.key} onClick={() => { setMode(m.key); setDetailClass(null); }}
+                  className={`flex-1 py-3 text-sm font-bold border-b-2 transition flex items-center justify-center gap-1.5
+                    ${mode===m.key ? 'text-indigo-600 border-indigo-500' : 'text-gray-400 border-transparent hover:text-gray-600'}`}>
+                  {m.icon} {m.label}
+                </button>
+              ))}
+            </div>
+
+            {!hasData ? (
+              <div className="py-20 text-center text-gray-300">
+                <div className="text-6xl mb-4">📊</div>
+                <p className="font-semibold text-gray-400">週案にデータが入力されていません</p>
+                <p className="text-xs mt-1 text-gray-300">週案タブでコマを登録すると、ここに集計が表示されます</p>
+              </div>
+            ) : mode === 'class' ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm border-collapse">
+                  <thead>
+                    <tr className="border-b-2 border-gray-100">
+                      <th className="text-left px-5 py-3 text-xs text-gray-400 font-semibold bg-gray-50 w-28">クラス</th>
+                      {settings.terms.map((term, i) => (
+                        <th key={i} className={`px-4 py-3 text-center text-xs font-bold bg-gray-50 ${termTermStyle[i]}`}>
+                          <div>{term.name}</div>
+                          {term.start && <div className="text-gray-400 font-normal text-[10px] mt-0.5">{fmd(new Date(term.start+'T00:00:00'))}〜{fmd(new Date(term.end+'T00:00:00'))}</div>}
+                        </th>
+                      ))}
+                      <th className="px-4 py-3 text-center text-xs font-bold text-gray-700 bg-gray-50">合計</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {displayClasses.map((cls, ci) => {
+                      const termVals = termStats.map(ts => ts.byClass[cls] || 0);
+                      const total = totalByClass[cls] || 0;
+                      return (
+                        <tr key={cls}
+                          onClick={() => setDetailClass(cls)}
+                          className={`border-b border-gray-50 cursor-pointer hover:bg-indigo-50/40 transition-colors ${ci%2===0?'bg-white':'bg-gray-50/40'}`}>
+                          <td className="px-5 py-3">
+                            <span className="font-bold text-gray-800 text-sm">{cls}</span>
+                          </td>
+                          {termVals.map((v, ti) => (
+                            <td key={ti} className={`px-4 py-3 text-center tabular-nums text-sm rounded`}>
+                              {v
+                                ? <span className={`inline-block px-2.5 py-0.5 rounded-lg text-sm ${cellBg(v, maxClass)}`}>{v}</span>
+                                : <span className="text-gray-200 text-xs">—</span>}
+                            </td>
+                          ))}
+                          <td className="px-4 py-3 text-center">
+                            <span className={`inline-block px-3 py-1 rounded-xl text-sm font-black ${total ? 'bg-indigo-100 text-indigo-700' : 'text-gray-200 text-xs'}`}>
+                              {total || '—'}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr className="border-t-2 border-gray-200 bg-gray-50">
+                      <td className="px-5 py-3 text-xs font-bold text-gray-500">合計</td>
+                      {termStats.map((ts, ti) => {
+                        const sum = Object.values(ts.byClass).reduce((s,v)=>s+v,0);
+                        return (
+                          <td key={ti} className={`px-4 py-3 text-center font-bold tabular-nums ${termTermStyle[ti]}`}>{sum||'—'}</td>
+                        );
+                      })}
+                      <td className="px-4 py-3 text-center font-black text-indigo-700 text-base tabular-nums">{grandTotal}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+                <p className="text-xs text-gray-400 text-center py-3">クリックすると教科別の詳細が見られます</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm border-collapse">
+                  <thead>
+                    <tr className="border-b-2 border-gray-100">
+                      <th className="text-left px-5 py-3 text-xs text-gray-400 font-semibold bg-gray-50 w-28">教科</th>
+                      {settings.terms.map((term, i) => (
+                        <th key={i} className={`px-4 py-3 text-center text-xs font-bold bg-gray-50 ${termTermStyle[i]}`}>
+                          <div>{term.name}</div>
+                          {term.start && <div className="text-gray-400 font-normal text-[10px] mt-0.5">{fmd(new Date(term.start+'T00:00:00'))}〜{fmd(new Date(term.end+'T00:00:00'))}</div>}
+                        </th>
+                      ))}
+                      <th className="px-4 py-3 text-center text-xs font-bold text-gray-700 bg-gray-50">合計</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {displaySubjects.map((sub, si) => {
+                      const termVals = termStats.map(ts => ts.bySubject[sub] || 0);
+                      const total = totalBySubject[sub] || 0;
+                      const st = SUB_STYLE[sub] || {};
+                      return (
+                        <tr key={sub} className={`border-b border-gray-50 ${si%2===0?'bg-white':'bg-gray-50/40'}`}>
+                          <td className="px-5 py-3">
+                            <span className={`inline-block text-xs px-2.5 py-1 rounded-lg font-semibold ${st.badge||'bg-gray-100 text-gray-600'}`}>{sub}</span>
+                          </td>
+                          {termVals.map((v, ti) => (
+                            <td key={ti} className="px-4 py-3 text-center tabular-nums text-sm">
+                              {v
+                                ? <span className={`inline-block px-2.5 py-0.5 rounded-lg text-sm ${cellBg(v, maxSubject)}`}>{v}</span>
+                                : <span className="text-gray-200 text-xs">—</span>}
+                            </td>
+                          ))}
+                          <td className="px-4 py-3 text-center">
+                            <span className={`inline-block px-3 py-1 rounded-xl text-sm font-black ${total ? 'bg-indigo-100 text-indigo-700' : 'text-gray-200 text-xs'}`}>
+                              {total || '—'}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr className="border-t-2 border-gray-200 bg-gray-50">
+                      <td className="px-5 py-3 text-xs font-bold text-gray-500">合計</td>
+                      {termStats.map((ts, ti) => {
+                        const sum = Object.values(ts.bySubject).reduce((s,v)=>s+v,0);
+                        return (
+                          <td key={ti} className={`px-4 py-3 text-center font-bold tabular-nums ${termTermStyle[ti]}`}>{sum||'—'}</td>
+                        );
+                      })}
+                      <td className="px-4 py-3 text-center font-black text-indigo-700 text-base tabular-nums">{grandTotal}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {mode === 'class' && hasData && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              {settings.terms.map((term, ti) => {
+                const ts = termStats[ti];
+                const sorted = Object.entries(ts.byClass).sort((a,b)=>b[1]-a[1]);
+                const sum = sorted.reduce((s,[,v])=>s+v,0);
+                if (!sorted.length) return null;
+                const ts_style = TERM_STYLE[ti];
+                return (
+                  <div key={ti} className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                    <div className={`px-4 py-3 flex items-center gap-2 ${termBgStyle[ti]}`}>
+                      <div className={`w-2 h-2 rounded-full ${ts_style.icon}`}/>
+                      <span className={`text-sm font-bold ${termTermStyle[ti]}`}>{term.name}</span>
+                      <span className={`ml-auto text-xs font-semibold ${termTermStyle[ti]}`}>{sum}コマ</span>
+                    </div>
+                    <div className="p-3 space-y-1.5">
+                      {sorted.map(([cls, cnt]) => (
+                        <div key={cls}
+                          onClick={() => setDetailClass(cls)}
+                          className="flex items-center gap-2 group cursor-pointer">
+                          <span className="text-xs font-bold text-gray-700 w-12 shrink-0">{cls}</span>
+                          <div className="flex-1 bg-gray-100 rounded-full h-2 overflow-hidden">
+                            <div className={`h-2 rounded-full transition-all ${ts_style.icon}`}
+                              style={{width:`${Math.round(cnt/sorted[0][1]*100)}%`}}/>
+                          </div>
+                          <span className="text-xs font-bold text-gray-600 tabular-nums w-8 text-right">{cnt}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {detailClass && <DetailModal cls={detailClass}/>}
+        </div>
+      );
+    }
+
+    // ── App ────────────────────────────────────────────────────
+    // Lite：localStorage キーを weekPlanLite* に総入れ替え（v1/v2/BYOC とデータ完全独立）
+    function App() {
+      const [view,       setView      ] = useState('main');
+      const [settings,   setSettings  ] = useState(() => {
+        try { const s=localStorage.getItem('weekPlanLiteSettings'); return s?{...DEFAULT_SETTINGS,...JSON.parse(s)}:DEFAULT_SETTINGS; }
+        catch { return DEFAULT_SETTINGS; }
+      });
+      const [annualData, setAnnualData] = useState(() => {
+        try { const s=localStorage.getItem('weekPlanLiteAnnual'); return s?{...DEFAULT_ANNUAL,...JSON.parse(s)}:DEFAULT_ANNUAL; }
+        catch { return DEFAULT_ANNUAL; }
+      });
+      const [timetable,  setTimetable ] = useState(() => {
+        try { const s=localStorage.getItem('weekPlanLiteTimetable'); return s?{...DEFAULT_TIMETABLE,...JSON.parse(s)}:DEFAULT_TIMETABLE; }
+        catch { return DEFAULT_TIMETABLE; }
+      });
+      const [allData,    setAllData   ] = useState(() => {
+        try {
+          const raw = JSON.parse(localStorage.getItem('weekPlanLiteData')||'{}');
+          // Lite マイグレーション：
+          //   旧 colSpan=7 メモ行のデータ（data.memos / data.memo）を
+          //   新 SLOTS の memo（periods.memo[dayKey].unit）に1回限り移行する。
+          //   - すでに periods.memo に何か入っている週は触らない（再実行安全）
+          //   - 完了フラグは別キー（weekPlanLiteMemoMigrated）に保存
+          const migrated = localStorage.getItem('weekPlanLiteMemoMigrated');
+          if (raw && typeof raw === 'object' && !migrated) {
+            const DAY_KEYS_LOCAL = ['mon','tue','wed','thu','fri','sat'];
+            for (const wk of Object.keys(raw)) {
+              const w = raw[wk];
+              if (!w || typeof w !== 'object') continue;
+              const hasOldMemos = w.memos && typeof w.memos === 'object' && Object.values(w.memos).some(v => v && String(v).trim());
+              const hasOldMemo  = typeof w.memo === 'string' && w.memo.trim();
+              if (!hasOldMemos && !hasOldMemo) continue;
+              const periods = w.periods || {};
+              const memoSlot = { ...(periods.memo || {}) };
+              for (let i=0;i<DAY_KEYS_LOCAL.length;i++) {
+                const dk = DAY_KEYS_LOCAL[i];
+                if (memoSlot[dk] && memoSlot[dk].unit && String(memoSlot[dk].unit).trim()) continue;
+                let text = '';
+                if (w.memos && typeof w.memos[dk] === 'string') text = w.memos[dk];
+                if (!text && i===0 && hasOldMemo) text = w.memo;
+                if (text && text.trim()) {
+                  memoSlot[dk] = { className:'', subject:'', lessonNo:'', unit:text };
+                }
+              }
+              w.periods = { ...periods, memo: memoSlot };
+              if (w.memos) delete w.memos;
+              if (typeof w.memo === 'string') delete w.memo;
+              raw[wk] = w;
+            }
+            try { localStorage.setItem('weekPlanLiteMemoMigrated', '1'); } catch(_) {}
+          }
+          return raw;
+        }
+        catch { return {}; }
+      });
+      const [master,     setMaster    ] = useState(() => {
+        try { const s=localStorage.getItem('weekPlanLiteMaster'); return s?JSON.parse(s):DEFAULT_MASTER; }
+        catch { return DEFAULT_MASTER; }
+      });
+
+      /* 「保存したのに消えるバグ」対策：localStorage 同期保存＋
+       * ①書き込み直後に読み戻して検証 ②直近スナップショットを
+       * 自動バックアップ（weekPlanLite*_backup）に二重保存しておく。 */
+      const safeSave = useCallback((key, value) => {
+        const json = JSON.stringify(value);
+        try {
+          localStorage.setItem(key, json);
+          if (localStorage.getItem(key) !== json) throw new Error('verify failed');
+          localStorage.setItem(key + '_backup', json);
+        } catch (e) {
+          try { console.warn('保存検証に失敗しました:', key, e); } catch(_) {}
+          try { window.alert('データの保存に失敗した可能性があります。\n設定タブの「バックアップ」から書き出しをおすすめします。'); } catch(_) {}
+        }
+      }, []);
+
+      useEffect(() => { safeSave('weekPlanLiteSettings',  settings);  }, [settings]);
+      useEffect(() => { safeSave('weekPlanLiteAnnual',    annualData);}, [annualData]);
+      useEffect(() => { safeSave('weekPlanLiteTimetable', timetable); }, [timetable]);
+      useEffect(() => { safeSave('weekPlanLiteData',      allData);   }, [allData]);
+      useEffect(() => { safeSave('weekPlanLiteMaster',    master);    }, [master]);
+
+      // バックアップ書き出し（Lite形式）
+      const exportBackup = () => {
+        const payload = {
+          _app:'jukan-integrated-lite', _version:1,
+          exportedAt:new Date().toISOString(),
+          settings, annualData, timetable, allData, master,
+        };
+        const blob = new Blob([JSON.stringify(payload,null,2)], {type:'application/json'});
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        const d    = new Date();
+        a.href = url;
+        a.download = `週案Liteバックアップ_${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+      // バックアップ読み込み（Lite/v2/BYOC/v1 すべて対応。Lite以外は自動で Lite スキーマに取り込む）
+      const importBackup = (file) => {
+        const reader = new FileReader();
+        reader.onload = e => {
+          try {
+            const p = JSON.parse(e.target.result);
+            const okApps = ['jukan-integrated-lite','jukan-integrated-v2','jukan-integrated-byoc','jukan-integrated'];
+            if (!okApps.includes(p._app)) throw new Error('形式不一致');
+            const isLite = p._app === 'jukan-integrated-lite';
+            const okMsg = isLite
+              ? '現在のデータをバックアップの内容で置き換えます。よろしいですか？'
+              : `他バージョン（${p._app}）のバックアップを Lite に取り込みます。よろしいですか？\n（カレンダー同期に関する情報は破棄され、週案・時間割・単元マスターのみが復元されます）`;
+            if (!window.confirm(okMsg)) return;
+            if (p.settings)   setSettings({...DEFAULT_SETTINGS, ...p.settings});
+            if (p.annualData) setAnnualData({...DEFAULT_ANNUAL, ...p.annualData});
+            if (p.timetable)  setTimetable({...DEFAULT_TIMETABLE, ...p.timetable});
+            if (p.allData)    setAllData(p.allData);
+            if (p.master)     setMaster(p.master);
+            window.alert(isLite ? 'バックアップを復元しました。' : `他バージョンのバックアップを Lite に取り込みました。`);
+          } catch (err) {
+            window.alert('読み込みに失敗しました。正しいバックアップファイルを選んでください。');
+          }
+        };
+        reader.readAsText(file);
+      };
+
+      return (
+        <div className="min-h-screen bg-slate-100 flex flex-col">
+          <TopNav view={view} setView={setView} ready={isSettingsReady(settings)}/>
+          {view==='main'
+            ? <WeeklyPlanView settings={settings} annualData={annualData} master={master} timetable={timetable} setView={setView} allData={allData} setAllData={setAllData}/>
+            : view==='timetable'
+            ? <TimetableView timetable={timetable} setTimetable={setTimetable} settings={settings} master={master} allData={allData} setAllData={setAllData}/>
+            : view==='master'
+            ? <MasterView master={master} setMaster={setMaster}/>
+            : view==='annual'
+            ? <AnnualView annualData={annualData} setAnnualData={setAnnualData}/>
+            : view==='stats'
+            ? <StatsView allData={allData} settings={settings} master={master}/>
+            : <SettingsView settings={settings} onSave={setSettings}
+                onExport={exportBackup} onImport={importBackup}/>
+          }
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
