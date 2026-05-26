@@ -1382,8 +1382,7 @@
                 onChange={e=>{ if(e.target.files[0]){ onImport(e.target.files[0]); e.target.value=''; } }}/>
             </div>
             <div className="px-6 pb-6 text-xs text-gray-400 leading-relaxed">
-              Lite版のバックアップファイルは <code className="bg-gray-100 px-1 rounded">jukan-integrated-lite</code> 形式で書き出されます。
-              旧バージョン（jukan-integrated / jukan-integrated-v2 / jukan-integrated-byoc）のバックアップもこの画面から読み込み可能です（自動でLite形式に変換して取り込みます）。
+              書き出したバックアップファイルは、同じ画面の「バックアップを読み込む」から復元できます。機種変更・ブラウザ初期化のときに使えます。
             </div>
           </section>
         </div>
@@ -1958,25 +1957,20 @@
         a.click();
         URL.revokeObjectURL(url);
       };
-      // バックアップ読み込み（Lite/v2/BYOC/v1 すべて対応。Lite以外は自動で Lite スキーマに取り込む）
+      // バックアップ読み込み
       const importBackup = (file) => {
         const reader = new FileReader();
         reader.onload = e => {
           try {
             const p = JSON.parse(e.target.result);
-            const okApps = ['jukan-integrated-lite','jukan-integrated-v2','jukan-integrated-byoc','jukan-integrated'];
-            if (!okApps.includes(p._app)) throw new Error('形式不一致');
-            const isLite = p._app === 'jukan-integrated-lite';
-            const okMsg = isLite
-              ? '現在のデータをバックアップの内容で置き換えます。よろしいですか？'
-              : `他バージョン（${p._app}）のバックアップを Lite に取り込みます。よろしいですか？\n（カレンダー同期に関する情報は破棄され、週案・時間割・単元マスターのみが復元されます）`;
-            if (!window.confirm(okMsg)) return;
+            if (p._app !== 'jukan-integrated-lite') throw new Error('形式不一致');
+            if (!window.confirm('現在のデータをバックアップの内容で置き換えます。よろしいですか？')) return;
             if (p.settings)   setSettings({...DEFAULT_SETTINGS, ...p.settings});
             if (p.annualData) setAnnualData({...DEFAULT_ANNUAL, ...p.annualData});
             if (p.timetable)  setTimetable({...DEFAULT_TIMETABLE, ...p.timetable});
             if (p.allData)    setAllData(p.allData);
             if (p.master)     setMaster(p.master);
-            window.alert(isLite ? 'バックアップを復元しました。' : `他バージョンのバックアップを Lite に取り込みました。`);
+            window.alert('バックアップを復元しました。');
           } catch (err) {
             window.alert('読み込みに失敗しました。正しいバックアップファイルを選んでください。');
           }
