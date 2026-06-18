@@ -7,6 +7,18 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script>
+    // 新しい @babel/standalone は JSX を「自動ランタイム」で変換し
+    // import { jsx } from "react/jsx-runtime" を生成する。単体HTML（type="text/babel"
+    // ＝通常スクリプト）では import が使えず、画面が真っ白で固まる（スマホ・PC共通）。
+    // classic ランタイム（React.createElement・import無し）を強制する preset を登録し、
+    // 下の text/babel から data-presets="react-classic" で使う（CDN版が上がっても壊れない）。
+    if (window.Babel && Babel.registerPreset && Babel.availablePresets) {
+      Babel.registerPreset('react-classic', {
+        presets: [[Babel.availablePresets['react'], { runtime: 'classic' }]]
+      });
+    }
+  </script>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     body { font-family: 'Hiragino Sans', 'Yu Gothic UI', sans-serif; }
@@ -24,7 +36,7 @@
 <body class="bg-slate-100 min-h-screen">
   <div id="root"></div>
 
-  <script type="text/babel">
+  <script type="text/babel" data-presets="react-classic">
     const { useState, useEffect, useCallback, useRef } = React;
 
     // ── マスターデータ ─────────────────────────────────────────
