@@ -1379,6 +1379,7 @@
               <div>
                 <h2 className="font-bold text-gray-800">バックアップ</h2>
                 <p className="text-xs text-gray-400 mt-0.5">データはこの端末・このブラウザに保存されます。機種変更や万一の消失に備え、定期的に書き出してください</p>
+                <p className="text-xs text-gray-500 mt-1">PCとスマホで同じデータを使いたいときは、<a href="https://note.com/guiguinokiroku/n/n4939e9c52270" target="_blank" rel="noopener" className="underline text-blue-600">同期できる版（note）</a>があります。ここで書き出したファイルを、そのまま読み込めます。</p>
               </div>
             </div>
             <div className="p-6 flex flex-wrap gap-3">
@@ -1543,6 +1544,12 @@
               </div>
             </div>
             <p className="text-center text-xs text-gray-400 mt-4 no-print">データはこのブラウザに自動保存されます（Liteキー：weekPlanLite*）</p>
+            {/* ★案内（2026-10）：使い方と、同期できる版へのリンク。3月にまとめ記事ができたら、リンク先をそこへ替える */}
+            <p className="text-center text-xs text-gray-500 mt-1 no-print">
+              <a href="https://note.com/guiguinokiroku/n/nf5a47f8a0a9d" target="_blank" rel="noopener" className="underline text-blue-600">使い方（note）</a>
+              <span className="mx-1.5 text-gray-300">／</span>
+              PCとスマホで同期・授業回数の自動カウントができる版は<a href="https://note.com/guiguinokiroku/n/n4939e9c52270" target="_blank" rel="noopener" className="underline text-blue-600">こちら（note）</a>
+            </p>
           </div>
           {modal && (
             <PeriodModal slot={modal.slot} dayIdx={modal.dayIdx}
